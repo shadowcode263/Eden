@@ -195,3 +195,10 @@ frontend/hopfield/node_modules/
 frontend/hopfield/.next/
 frontend/hopfield/.next-cache/
 frontend/hopfield/.cache/
+
+# migrations
+#  Django migrations are usually not ignored, but if you want to ignore them, uncomment the
+#  following line.  This is not recommended for libraries, but may be useful for applications
+#  where migrations are not needed or are managed differently.
+
+migrations/
