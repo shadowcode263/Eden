@@ -1,91 +1,75 @@
 from django.db import models
-import numpy as np
-import pickle
-import hashlib
-from typing import List, Dict, Any
-import logging
-
-logger = logging.getLogger(__name__)
+from django.core.exceptions import ValidationError
 
 class BrainNetwork(models.Model):
-    name = models.CharField(max_length=255)
-    embedding_dim = models.IntegerField(default=64)
-    beta = models.FloatField(default=20.0)
-    learning_rate = models.FloatField(default=0.1)
-    merkle_root = models.CharField(max_length=64, null=True, blank=True)
+    """
+    Represents a single STAG network instance and its hyperparameters.
+    """
+    name = models.CharField(max_length=255, unique=True)
+
+    # --- STAG Hyperparameters ---
+    sdr_dimensionality = models.PositiveIntegerField(default=2048, help_text="Total number of bits in an SDR.")
+    sdr_sparsity = models.PositiveIntegerField(default=40, help_text="Number of active bits in an SDR (approx 2%).")
+
+    # GNG Learning rates and decay
+    winner_learning_rate = models.FloatField(default=0.1, help_text="Learning rate (eta_1) for the winning node.")
+    neighbor_learning_rate = models.FloatField(default=0.01,
+                                               help_text="Learning rate (eta_2) for the winner's neighbors.")
+    error_decay_rate = models.FloatField(default=0.9995, help_text="Decay factor for all nodes' errors per iteration.")
+
+    # GNG Structural plasticity params
+    max_edge_age = models.PositiveIntegerField(default=50, help_text="Max age for a topological edge before it's pruned.")
+    n_iter_before_neuron_added = models.PositiveIntegerField(default=100,
+                                                             help_text="Number of iterations before growing a new node.")
+    max_nodes = models.PositiveIntegerField(default=5000, help_text="The maximum number of nodes the network can grow to.")
+
+    # HTM Temporal Sequence Hyperparameters
+    cells_per_column = models.PositiveIntegerField(default=32, help_text="Number of cells within each node (mini-column).")
+    initial_permanence = models.FloatField(default=0.21, help_text="Initial permanence for new synapses.")
+    connected_permanence = models.FloatField(default=0.50, help_text="Permanence value above which a synapse is considered connected.")
+    permanence_increment = models.FloatField(default=0.10, help_text="Amount to increase permanence for active synapses.")
+    permanence_decrement = models.FloatField(default=0.02, help_text="Amount to decrease permanence for inactive synapses.")
+    activation_threshold = models.PositiveIntegerField(default=10, help_text="Number of connected synapses required to activate a dendrite segment.")
+
+    # --- Reinforcement Learning Hyperparameters ---
+    rl_learning_rate = models.FloatField(default=0.1, help_text="Q-learning learning rate (alpha).")
+    rl_discount_factor = models.FloatField(default=0.9, help_text="RL discount factor (gamma) for future rewards.")
+    rl_exploration_rate = models.FloatField(default=0.3, help_text="RL exploration rate (epsilon) for choosing random actions.")
+
+    is_active = models.BooleanField(default=False, help_text="Designates this as the currently active network. Only one can be active.")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        db_table = 'brain_networks'
+        verbose_name = "Brain Network"
+        verbose_name_plural = "Brain Networks"
 
     def __str__(self):
-        return f"Brain Network: {self.name}"
+        return self.name
 
+    def save(self, *args, **kwargs):
+        """
+        Ensures that only one network can be active at a time.
+        """
+        if self.is_active:
+            BrainNetwork.objects.filter(is_active=True).exclude(pk=self.pk).update(is_active=False)
+        super().save(*args, **kwargs)
 
-class BrainPattern(models.Model):
-    network = models.ForeignKey(BrainNetwork, on_delete=models.CASCADE, related_name='patterns')
-    pattern_hash = models.CharField(max_length=64, unique=True)
-    text_content = models.TextField(null=True, blank=True) # New field to store original text
-    pattern_data = models.BinaryField()  # Serialized numpy array
-    embedding_data = models.BinaryField()  # Serialized embedding
-    usage_count = models.IntegerField(default=0)
+class GraphSnapshot(models.Model):
+    """
+    Represents a saved state (snapshot) of a STAG network at a point in time.
+    This allows for versioning and restoring the graph's "weights".
+    """
+    network = models.ForeignKey(BrainNetwork, related_name='snapshots', on_delete=models.CASCADE)
+    name = models.CharField(max_length=255, help_text="A descriptive name for the snapshot.")
+    graph_data = models.JSONField(help_text="The entire graph state (nodes and links) serialized as JSON.")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        db_table = 'brain_patterns'
-        # Add a unique_together constraint to ensure pattern_hash is unique per network
-        # This prevents issues if the same hash could exist across different networks
-        unique_together = ('network', 'pattern_hash',)
-
-
-    def get_pattern_array(self) -> np.ndarray:
-        try:
-            return pickle.loads(self.pattern_data)
-        except Exception as e:
-            logger.error(f"Error deserializing pattern_data for hash {self.pattern_hash}: {e}")
-            # Return an empty array or raise a specific error if data is corrupted
-            return np.array([])
-
-    def set_pattern_array(self, pattern: np.ndarray):
-        try:
-            self.pattern_data = pickle.dumps(pattern)
-            logger.debug(f"Pattern {self.pattern_hash[:8]}... pickled. Size: {len(self.pattern_data)} bytes.")
-        except Exception as e:
-            logger.error(f"Error pickling pattern_data for hash {self.pattern_hash}: {e}")
-            raise # Re-raise to indicate a critical error
-
-    def get_embedding_array(self) -> np.ndarray:
-        try:
-            return pickle.loads(self.embedding_data)
-        except Exception as e:
-            logger.error(f"Error deserializing embedding_data for hash {self.pattern_hash}: {e}")
-            # Return an empty array or raise a specific error if data is corrupted
-            return np.array([])
-
-    def set_embedding_array(self, embedding: np.ndarray):
-        try:
-            self.embedding_data = pickle.dumps(embedding)
-            logger.debug(f"Embedding {self.pattern_hash[:8]}... pickled. Size: {len(self.embedding_data)} bytes.")
-        except Exception as e:
-            logger.error(f"Error pickling embedding_data for hash {self.pattern_hash}: {e}")
-            raise # Re-raise to indicate a critical error
+        ordering = ['-created_at']
+        verbose_name = "Graph Snapshot"
+        verbose_name_plural = "Graph Snapshots"
+        unique_together = ('network', 'name')
 
     def __str__(self):
-        return f"Pattern {self.pattern_hash[:8]}..."
-
-
-class BrainRetrieval(models.Model):
-    network = models.ForeignKey(BrainNetwork, on_delete=models.CASCADE, related_name='retrievals')
-    query_text = models.TextField(null=True, blank=True)
-    retrieved_pattern = models.ForeignKey(BrainPattern, on_delete=models.SET_NULL, null=True)
-    confidence_score = models.FloatField()
-    # Changed from IntegerField to JSONField to store the full steps data
-    retrieval_steps_data = models.JSONField(null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        db_table = 'brain_retrievals'
-
-    def __str__(self):
-        return f"Retrieval at {self.created_at}"
+        return f"Snapshot '{self.name}' for {self.network.name} @ {self.created_at.strftime('%Y-%m-%d %H:%M')}"

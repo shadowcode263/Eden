@@ -1,706 +1,715 @@
 "use client"
 
 import type React from "react"
-
 import { useEffect, useRef, useState, useCallback } from "react"
-import { Canvas, useThree, useFrame } from "@react-three/fiber"
-import { OrbitControls, Html } from "@react-three/drei"
-import * as THREE from "three"
-import { useWebSocket } from "@/hooks/use-websocket"
+import { Card, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { AlertCircle, Wifi, WifiOff } from "lucide-react"
+import { Button } from "@/components/ui/button"
+import { Wifi, WifiOff, AlertCircle, Box, Layers, RefreshCw } from "lucide-react"
+import { useWebSocket } from "@/hooks/use-websocket"
+import dynamic from "next/dynamic"
+
+// Dynamically import ForceGraph3D to avoid SSR issues
+const ForceGraph3D = dynamic(() => import("react-force-graph-3d"), {
+  ssr: false,
+  loading: () => (
+    <div className="flex items-center justify-center h-full">
+      <div className="text-center text-blue-300">
+        <div className="w-16 h-16 mx-auto border-4 border-blue-400 rounded-full animate-pulse mb-4"></div>
+        <p className="text-sm font-mono">Loading 3D Engine...</p>
+      </div>
+    </div>
+  ),
+})
+
+// Dynamically import THREE to avoid SSR issues
+const THREE = dynamic(() => import("three"), { ssr: false })
+
+interface Node {
+  id: string
+  x: number
+  y: number
+  z?: number
+  size: number
+  color: string
+  active?: boolean
+  error?: number
+  last_active_iter?: number
+  type?: string
+}
+
+interface Link {
+  source: string
+  target: string
+  strength: number
+  color: string
+  age?: number
+}
+
+interface GraphData {
+  nodes: Node[]
+  links: Link[]
+}
 
 interface BrainVisualizationProps {
-  networkId: number
-  embeddingDim: number // New prop: embedding dimension from the network
-  onRetrievalSummaryUpdate: (data: RetrievalSummaryData) => void // Callback to update parent
+  networkId: number | null
 }
 
-interface NetworkUpdate {
-  type: string
-  event_type: string
-  data: any
+interface SelectedNodeInfo {
+  id: string
+  error: number
+  position: { x: number; y: number; z?: number }
+  type?: string
+  last_active?: number
 }
 
-interface RetrievalSummaryData {
-  query_text: string
-  confidence_score: number
-  steps_count: number
-  retrieved_hash: string
-  retrieved_text: string
-}
-
-// Define NeuronAnimationState type
-interface NeuronAnimationState {
-  targetScale: number
-  targetPosition: THREE.Vector3
-  targetColor: THREE.Color
-  targetEmissive: THREE.Color
-}
-
-// New component for the 3D scene content and HTML overlays
-function BrainSceneContent({
-  embeddingDim,
-  lastMessage,
+// 2D Visualization Component (Always Centered)
+function BrainVisualization2D({
+  networkId,
+  graphData,
+  selectedNode,
+  setSelectedNode,
   activity,
-  setActivity,
-  localRetrievalSummaryData,
-  setLocalRetrievalSummaryData,
   isConnected,
-  connectionHealth,
-  connectionStatus,
-  getConnectionStatusColor,
-  getConnectionStatusText,
+  handleCanvasClick,
 }: {
-  embeddingDim: number
-  lastMessage: any
+  networkId: number | null
+  graphData: GraphData
+  selectedNode: SelectedNodeInfo | null
+  setSelectedNode: (node: SelectedNodeInfo | null) => void
   activity: string
-  setActivity: React.Dispatch<React.SetStateAction<string>>
-  localRetrievalSummaryData: RetrievalSummaryData | null
-  setLocalRetrievalSummaryData: React.Dispatch<React.SetStateAction<RetrievalSummaryData | null>>
   isConnected: boolean
-  connectionHealth: any
-  connectionStatus: string
-  getConnectionStatusColor: () => string
-  getConnectionStatusText: () => string
+  handleCanvasClick: (event: React.MouseEvent<HTMLCanvasElement>) => void
 }) {
-  const { scene, camera, gl } = useThree()
-  const controlsRef = useRef<any>() // OrbitControls ref
-  const neuronsRef = useRef<THREE.Mesh[]>([])
-  // Ref to store connection data: { line object, index of neuron1, index of neuron2 }
-  const connectionDataRef = useRef<{ line: THREE.Line; startNeuronIndex: number; endNeuronIndex: number }[]>([])
-  // New useRef for managing neuron animation states
-  const neuronAnimationStateRef = useRef(new Map<number, NeuronAnimationState>())
-  // Ref to store setTimeout IDs for cleanup
-  const retrievalAnimationTimeoutsRef = useRef<NodeJS.Timeout[]>([])
+  const canvasRef = useRef<HTMLCanvasElement>(null)
 
-  // Three.js setup
+  // Canvas rendering with always-centered layout
   useEffect(() => {
-    // Cleanup function for previous Three.js instance
-    const cleanupThree = () => {
-      // Clear any pending animation timeouts
-      retrievalAnimationTimeoutsRef.current.forEach(clearTimeout)
-      retrievalAnimationTimeoutsRef.current = []
+    const canvas = canvasRef.current
+    if (!canvas) return
 
-      // Dispose of geometries and materials
-      scene.children.forEach((obj) => {
-        if (obj instanceof THREE.Mesh || obj instanceof THREE.Line) {
-          scene.remove(obj)
-          obj.geometry.dispose()
-          if (Array.isArray(obj.material)) {
-            obj.material.forEach((m) => m.dispose())
-          } else if (obj.material) {
-            obj.material.dispose()
-          }
+    const ctx = canvas.getContext("2d")
+    if (!ctx) return
+
+    const resizeCanvas = () => {
+      const rect = canvas.getBoundingClientRect()
+      canvas.width = rect.width * window.devicePixelRatio
+      canvas.height = rect.height * window.devicePixelRatio
+      ctx.scale(window.devicePixelRatio, window.devicePixelRatio)
+      canvas.style.width = rect.width + "px"
+      canvas.style.height = rect.height + "px"
+    }
+
+    resizeCanvas()
+    window.addEventListener("resize", resizeCanvas)
+
+    const animate = () => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height)
+
+      const centerX = canvas.clientWidth / 2
+      const centerY = canvas.clientHeight / 2
+
+      if (graphData.nodes.length === 0) {
+        // Show empty state with sci-fi styling
+        ctx.fillStyle = "#64748b"
+        ctx.font = "18px 'JetBrains Mono', monospace"
+        ctx.textAlign = "center"
+        ctx.fillText("NETWORK OFFLINE", centerX, centerY - 20)
+
+        ctx.font = "14px 'JetBrains Mono', monospace"
+        ctx.fillStyle = "#94a3b8"
+        ctx.fillText("Initialize neural pathways to begin", centerX, centerY + 10)
+
+        // Draw pulsing brain icon
+        const time = Date.now() * 0.003
+        const pulse = 0.8 + 0.2 * Math.sin(time)
+        const brainSize = 50 * pulse
+
+        ctx.strokeStyle = `rgba(100, 116, 139, ${pulse})`
+        ctx.lineWidth = 2
+        ctx.beginPath()
+        ctx.arc(centerX, centerY - 80, brainSize / 2, 0, Math.PI * 2)
+        ctx.stroke()
+
+        // Add scanning lines effect
+        ctx.strokeStyle = `rgba(59, 130, 246, 0.3)`
+        ctx.lineWidth = 1
+        for (let i = 0; i < 3; i++) {
+          const offset = (time * 50 + i * 30) % 200
+          ctx.beginPath()
+          ctx.moveTo(centerX - 100, centerY - 80 + offset - 100)
+          ctx.lineTo(centerX + 100, centerY - 80 + offset - 100)
+          ctx.stroke()
         }
-      })
-      // Clear refs
-      neuronsRef.current = []
-      connectionDataRef.current = []
-      neuronAnimationStateRef.current.clear() // Clear animation state map
-    }
-
-    // Perform cleanup before re-initializing
-    cleanupThree()
-
-    // Basic scene setup (background, fog, lights)
-    scene.background = new THREE.Color(0x0a0a0f)
-    scene.fog = new THREE.Fog(0x0a0a0f, 10, 50)
-
-    const ambientLight = new THREE.AmbientLight(0x1a1a2e, 0.3)
-    scene.add(ambientLight)
-
-    const directionalLight = new THREE.DirectionalLight(0x4a9eff, 1.2)
-    directionalLight.position.set(10, 10, 5)
-    directionalLight.castShadow = true
-    directionalLight.shadow.mapSize.width = 2048
-    directionalLight.shadow.mapSize.height = 2048
-    scene.add(directionalLight)
-
-    const directionalLight2 = new THREE.DirectionalLight(0x9d4edd, 0.8)
-    directionalLight2.position.set(-10, -5, -5)
-    scene.add(directionalLight2)
-
-    const pointLight = new THREE.PointLight(0x00ffff, 0.6, 20)
-    pointLight.position.set(0, 8, 0)
-    scene.add(pointLight)
-
-    // Initial camera position
-    camera.position.set(0, 5, 18)
-    camera.lookAt(0, 0, 0)
-
-    // Create brain structure (neurons and connections)
-    createFuturisticBrainStructure(scene, embeddingDim, neuronsRef, connectionDataRef, neuronAnimationStateRef)
-
-    // Return cleanup function for this effect
-    return () => {
-      cleanupThree() // Ensure cleanup on unmount or embeddingDim changes
-    }
-  }, [scene, camera, embeddingDim]) // Dependencies for Three.js setup
-
-  // Animation loop using useFrame
-  useFrame(() => {
-    if (controlsRef.current) {
-      controlsRef.current.update()
-    }
-
-    // Apply neuron animation states
-    neuronsRef.current.forEach((neuron, index) => {
-      const state = neuronAnimationStateRef.current.get(index)
-      if (state) {
-        const material = neuron.material as THREE.MeshLambertMaterial
-        const lerpFactor = 0.1 // Smoothness factor
-
-        // Lerp position
-        neuron.position.lerp(state.targetPosition, lerpFactor)
-
-        // Lerp scale
-        neuron.scale.lerp(new THREE.Vector3(state.targetScale, state.targetScale, state.targetScale), lerpFactor)
-
-        // Lerp color and emissive
-        material.color.lerp(state.targetColor, lerpFactor)
-        material.emissive.lerp(state.targetEmissive, lerpFactor)
-      }
-    })
-
-    // Update connection positions based on current neuron positions
-    connectionDataRef.current.forEach(({ line, startNeuronIndex, endNeuronIndex }) => {
-      const startNeuron = neuronsRef.current[startNeuronIndex]
-      const endNeuron = neuronsRef.current[endNeuronIndex]
-
-      if (startNeuron && endNeuron) {
-        const positions = line.geometry.attributes.position.array as Float32Array
-        positions[0] = startNeuron.position.x
-        positions[1] = startNeuron.position.y
-        positions[2] = startNeuron.position.z
-        positions[3] = endNeuron.position.x
-        positions[4] = endNeuron.position.y
-        positions[5] = endNeuron.position.z
-        line.geometry.attributes.position.needsUpdate = true // Important!
-      }
-    })
-
-    gl.render(scene, camera) // Explicitly render
-  })
-
-  // Network update handling
-  useEffect(() => {
-    if (lastMessage) {
-      handleNetworkUpdate(lastMessage)
-    }
-  }, [lastMessage])
-
-  // Brain control event handler
-  useEffect(() => {
-    const handleBrainControl = (event: CustomEvent) => {
-      const { type, value } = event.detail
-      if (!controlsRef.current) return
-
-      switch (type) {
-        case "zoom":
-          const currentPosition = camera.position.clone()
-          const direction = currentPosition.clone().normalize()
-          camera.position.copy(direction.multiplyScalar(value))
-          controlsRef.current.target.set(0, 0, 0)
-          controlsRef.current.update()
-          break
-        case "rotationSpeed":
-          controlsRef.current.autoRotateSpeed = value
-          break
-        case "autoRotate":
-          controlsRef.current.autoRotate = value
-          break
-        case "reset":
-          camera.position.set(0, 5, 18)
-          camera.lookAt(0, 0, 0)
-          controlsRef.current.target.set(0, 0, 0)
-          controlsRef.current.autoRotateSpeed = 1.0
-          controlsRef.current.autoRotate = true
-          controlsRef.current.update()
-          break
-      }
-    }
-
-    window.addEventListener("brainControl", handleBrainControl as EventListener)
-    return () => {
-      window.removeEventListener("brainControl", handleBrainControl as EventListener)
-    }
-  }, [camera]) // Dependency on camera for position/lookAt
-
-  const createFuturisticBrainStructure = (
-    scene: THREE.Scene,
-    numNeurons: number,
-    neuronsRef: React.MutableRefObject<THREE.Mesh[]>,
-    connectionDataRef: React.MutableRefObject<{ line: THREE.Line; startNeuronIndex: number; endNeuronIndex: number }[]>,
-    neuronAnimationStateRef: React.MutableRefObject<Map<number, NeuronAnimationState>>,
-  ) => {
-    // Clear existing objects
-    scene.children.forEach((obj) => {
-      if (obj instanceof THREE.Mesh || obj instanceof THREE.Line) {
-        scene.remove(obj)
-        obj.geometry.dispose()
-        if (Array.isArray(obj.material)) {
-          obj.material.forEach((m) => m.dispose())
-        } else if (obj.material) {
-          obj.material.dispose()
-        }
-      }
-    })
-    neuronsRef.current = []
-    connectionDataRef.current = []
-    neuronAnimationStateRef.current.clear() // Clear animation state map
-
-    const neuronGeometry = new THREE.SphereGeometry(0.08, 16, 16)
-    const neurons: THREE.Mesh[] = []
-
-    const phiIncrement = Math.PI * (3 - Math.sqrt(5))
-    const sphereRadius = 6.5 // Radius for neuron placement
-
-    const defaultNeuronColor = new THREE.Color(0x007bff)
-    const defaultNeuronEmissive = new THREE.Color(0x002244)
-
-    for (let i = 0; i < numNeurons; i++) {
-      const y = 1 - (i / (numNeurons - 1)) * 2
-      const radiusAtY = Math.sqrt(1 - y * y)
-
-      const theta = i * phiIncrement
-
-      const neuronMaterial = new THREE.MeshLambertMaterial({
-        color: defaultNeuronColor,
-        transparent: true,
-        opacity: 0.9,
-        emissive: defaultNeuronEmissive,
-      })
-      const neuron = new THREE.Mesh(neuronGeometry, neuronMaterial)
-
-      neuron.position.x = radiusAtY * Math.cos(theta) * sphereRadius
-      neuron.position.y = y * sphereRadius
-      neuron.position.z = radiusAtY * Math.sin(theta) * sphereRadius
-
-      // Store the original position for later reference
-      neuron.userData.originalPosition = neuron.position.clone()
-
-      neuron.castShadow = true
-      neuron.receiveShadow = true
-      scene.add(neuron)
-      neurons.push(neuron)
-
-      // Initialize animation state for each neuron
-      neuronAnimationStateRef.current.set(i, {
-        targetScale: 1,
-        targetPosition: neuron.position.clone(),
-        targetColor: defaultNeuronColor.clone(),
-        targetEmissive: defaultNeuronEmissive.clone(),
-      })
-    }
-
-    neuronsRef.current = neurons
-
-    const connectionsData: { line: THREE.Line; startNeuronIndex: number; endNeuronIndex: number }[] = []
-    // Make connections much denser for smaller networks
-    if (numNeurons <= 200) {
-      // Apply denser connections up to 200 neurons
-      for (let i = 0; i < neurons.length; i++) {
-        for (let j = i + 1; j < neurons.length; j++) {
-          const distance = neurons[i].position.distanceTo(neurons[j].position)
-          // Connect if within a larger visual proximity
-          if (distance < 10.0) {
-            // Increased distance threshold for denser connections
-            const geometry = new THREE.BufferGeometry()
-            geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(6), 3)) // 2 vertices * 3 components
-            const material = new THREE.LineBasicMaterial({
-              color: 0xcccccc,
-              transparent: true,
-              opacity: 0.4,
-            })
-            const line = new THREE.Line(geometry, material)
-            scene.add(line)
-            connectionsData.push({ line, startNeuronIndex: i, endNeuronIndex: j })
-          }
-        }
-      }
-    } else {
-      // For very large networks (e.g., 512), keep sparse connections for performance
-      for (let i = 0; i < neurons.length; i++) {
-        for (let j = i + 1; j < neurons.length; j++) {
-          const distance = neurons[i].position.distanceTo(neurons[j].position)
-          if (distance < 3.0 && Math.random() < 0.05) {
-            // Keep some sparse connections
-            const geometry = new THREE.BufferGeometry()
-            geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(6), 3)) // 2 vertices * 3 components
-            const material = new THREE.LineBasicMaterial({
-              color: 0xcccccc,
-              transparent: true,
-              opacity: 0.4,
-            })
-            const line = new THREE.Line(geometry, material)
-            scene.add(line)
-            connectionsData.push({ line, startNeuronIndex: i, endNeuronIndex: j })
-          }
-        }
-      }
-    }
-    connectionDataRef.current = connectionsData
-
-    const particleGeometry = new THREE.BufferGeometry()
-    const particleCount = 200
-    const positions = new Float32Array(particleCount * 3)
-
-    for (let i = 0; i < particleCount * 3; i += 3) {
-      positions[i] = (Math.random() - 0.5) * 20
-      positions[i + 1] = (Math.random() - 0.5) * 20
-      positions[i + 2] = (Math.random() - 0.5) * 20
-    }
-
-    particleGeometry.setAttribute("position", new THREE.BufferAttribute(positions, 3))
-
-    const particleMaterial = new THREE.PointsMaterial({
-      color: 0x00ffff,
-      size: 0.02,
-      transparent: true,
-      opacity: 0.6,
-    })
-
-    const particles = new THREE.Points(particleGeometry, particleMaterial)
-    scene.add(particles)
-  }
-
-  const handleNetworkUpdate = (update: NetworkUpdate) => {
-    switch (update.event_type) {
-      case "pattern_stored":
-        animatePatternStorage(update.data)
-        break
-      case "pattern_retrieved":
-        animatePatternRetrieval(update.data)
-        setLocalRetrievalSummaryData({
-          query_text: update.data.query_text,
-          confidence_score: update.data.confidence,
-          steps_count: update.data.steps?.length || 0,
-          retrieved_hash: update.data.retrieved_hash,
-          retrieved_text: update.data.retrieved_text,
+      } else {
+        // Calculate center of mass for existing nodes
+        let totalX = 0
+        let totalY = 0
+        graphData.nodes.forEach((node) => {
+          totalX += node.x
+          totalY += node.y
         })
-        break
-    }
-  }
+        const avgX = totalX / graphData.nodes.length
+        const avgY = totalY / graphData.nodes.length
 
-  const animatePatternStorage = (data: any) => {
-    setActivity(`Storing Pattern: "${data.text}"`)
-    setLocalRetrievalSummaryData(null)
+        // Calculate offset to center the graph
+        const offsetX = centerX - avgX
+        const offsetY = centerY - avgY
 
-    // Clear any existing retrieval animation timeouts
-    retrievalAnimationTimeoutsRef.current.forEach(clearTimeout)
-    retrievalAnimationTimeoutsRef.current = []
+        // Draw links first (so they appear behind nodes) with centering offset
+        graphData.links.forEach((link) => {
+          const sourceNode = graphData.nodes.find((n) => n.id === link.source)
+          const targetNode = graphData.nodes.find((n) => n.id === link.target)
 
-    const numActiveNeurons = Math.min(30, neuronsRef.current.length)
-    const activeNeuronsIndices = neuronsRef.current
-      .map((_, i) => i)
-      .sort(() => 0.5 - Math.random())
-      .slice(0, numActiveNeurons)
-
-    // Reset all connections to default before animating
-    connectionDataRef.current.forEach(({ line }) => {
-      const connectionMaterial = line.material as THREE.LineBasicMaterial
-      connectionMaterial.color.setHex(0xcccccc)
-      connectionMaterial.opacity = 0.4
-    })
-
-    const storageExcitationDistance = 0.5 // How much neurons move outward during storage
-    const storageVerticalPulseMagnitude = 0.2 // How much neurons pulse up/down during storage
-
-    activeNeuronsIndices.forEach((neuronIndex, index) => {
-      const timeoutId = setTimeout(() => {
-        const neuron = neuronsRef.current[neuronIndex]
-        if (neuron) {
-          const originalPos = neuron.userData.originalPosition.clone()
-          const direction = originalPos.clone().normalize()
-          const pulseOffset = Math.sin(index * 0.5) * storageVerticalPulseMagnitude // Use index for varied pulse
-
-          const targetPos = originalPos
-            .clone()
-            .add(direction.multiplyScalar(storageExcitationDistance))
-            .add(new THREE.Vector3(0, pulseOffset, 0))
-
-          // Update target state for this neuron
-          neuronAnimationStateRef.current.set(neuronIndex, {
-            targetScale: 1.2, // Slightly larger
-            targetPosition: targetPos,
-            targetColor: new THREE.Color(0x00ff00), // Green
-            targetEmissive: new THREE.Color(0x004400),
-          })
-        }
-
-        // Animate connections
-        connectionDataRef.current.forEach(({ line }) => {
-          const connectionMaterial = line.material as THREE.LineBasicMaterial
-          connectionMaterial.color.setHex(0x00ff00) // Green
-          connectionMaterial.opacity = 0.8
-        })
-
-        const resetTimeoutId = setTimeout(() => {
-          // Reset target state for this neuron
-          if (neuron) {
-            neuronAnimationStateRef.current.set(neuronIndex, {
-              targetScale: 1,
-              targetPosition: neuron.userData.originalPosition.clone(),
-              targetColor: new THREE.Color(0x007bff), // Default blue
-              targetEmissive: new THREE.Color(0x002244),
-            })
-          }
-
-          // Reset connections
-          connectionDataRef.current.forEach(({ line }) => {
-            const connectionMaterial = line.material as THREE.LineBasicMaterial
-            connectionMaterial.color.setHex(0xcccccc) // Default gray
-            connectionMaterial.opacity = 0.4
-          })
-        }, 1200) // Duration for the storage animation
-        retrievalAnimationTimeoutsRef.current.push(resetTimeoutId)
-      }, index * 30) // Staggered animation
-      retrievalAnimationTimeoutsRef.current.push(timeoutId)
-    })
-
-    const finalActivityTimeoutId = setTimeout(() => setActivity("Pattern Stored Successfully"), 2500)
-    retrievalAnimationTimeoutsRef.current.push(finalActivityTimeoutId)
-  }
-
-  const animatePatternRetrieval = (data: any) => {
-    setActivity(`Retrieving: "${data.query_text}"`)
-
-    // Clear any existing retrieval animation timeouts
-    retrievalAnimationTimeoutsRef.current.forEach(clearTimeout)
-    retrievalAnimationTimeoutsRef.current = []
-
-    // Reset all neurons to dormant state by updating their target states
-    neuronsRef.current.forEach((neuron, index) => {
-      neuronAnimationStateRef.current.set(index, {
-        targetScale: 1,
-        targetPosition: neuron.userData.originalPosition.clone(),
-        targetColor: new THREE.Color(0x007bff), // Default blue
-        targetEmissive: new THREE.Color(0x002244),
-      })
-    })
-
-    const firingThreshold = 0.001
-    const excitationMultiplier = 4.0 // Outward movement
-    const verticalPulseMagnitude = 0.5 // For up/down movement
-
-    data.steps?.forEach((step: any, stepIndex: number) => {
-      const timeoutId = setTimeout(() => {
-        step.state?.forEach((stateValue: number, neuronIndex: number) => {
-          if (neuronIndex < neuronsRef.current.length) {
-            const neuron = neuronsRef.current[neuronIndex]
-            const originalPos = neuron.userData.originalPosition.clone()
-
-            if (stateValue > firingThreshold) {
-              const direction = originalPos.clone().normalize()
-              const excitationDistance = stateValue * excitationMultiplier
-
-              // Calculate new target position: original + outward + vertical pulse
-              const targetPos = originalPos
-                .clone()
-                .add(direction.multiplyScalar(excitationDistance))
-                .add(new THREE.Vector3(0, Math.sin(stepIndex * 0.5) * verticalPulseMagnitude, 0)) // Simple sine wave for vertical pulse
-
-              // Update target state for firing neuron
-              neuronAnimationStateRef.current.set(neuronIndex, {
-                targetScale: 1 + stateValue * 0.5,
-                targetPosition: targetPos,
-                targetColor: new THREE.Color(0x00ff00), // Green
-                targetEmissive: new THREE.Color(0x004400),
-              })
-            } else {
-              // Update target state for non-firing neuron (return to default)
-              neuronAnimationStateRef.current.set(neuronIndex, {
-                targetScale: 1,
-                targetPosition: originalPos,
-                targetColor: new THREE.Color(0x007bff), // Default blue
-                targetEmissive: new THREE.Color(0x002244),
-              })
+          if (sourceNode && targetNode) {
+            // Add glow effect for strong connections
+            if (link.strength > 0.7) {
+              ctx.shadowColor = link.color
+              ctx.shadowBlur = 10
             }
+
+            ctx.strokeStyle = link.color || "#64748b"
+            ctx.lineWidth = Math.max(0.5, link.strength * 3)
+            ctx.globalAlpha = 0.8
+            ctx.beginPath()
+            ctx.moveTo(sourceNode.x + offsetX, sourceNode.y + offsetY)
+            ctx.lineTo(targetNode.x + offsetX, targetNode.y + offsetY)
+            ctx.stroke()
+
+            ctx.shadowBlur = 0
+            ctx.globalAlpha = 1
           }
         })
 
-        // Animate connections for this step
-        connectionDataRef.current.forEach(({ line, startNeuronIndex, endNeuronIndex }) => {
-          const material = line.material as THREE.LineBasicMaterial
-          // Check if either connected neuron is firing above threshold
-          const startFiring = step.state[startNeuronIndex] > firingThreshold
-          const endFiring = step.state[endNeuronIndex] > firingThreshold
+        // Draw nodes with enhanced styling and centering offset
+        graphData.nodes.forEach((node) => {
+          const nodeX = node.x + offsetX
+          const nodeY = node.y + offsetY
 
-          if (startFiring || endFiring) {
-            material.color.setHex(0x00ff00) // Green
-            material.opacity = 0.8
-          } else {
-            material.color.setHex(0xcccccc) // Default gray
-            material.opacity = 0.4
+          // Node glow effect for active nodes
+          if (node.active) {
+            ctx.shadowColor = node.color
+            ctx.shadowBlur = 20
           }
-        })
-      }, stepIndex * 120) // Delay per step
-      retrievalAnimationTimeoutsRef.current.push(timeoutId)
-    })
 
-    // Final reset of neuron and connection target states after animation completes
-    const finalResetTimeoutId = setTimeout(
-      () => {
-        setActivity(`Retrieved with ${(data.confidence * 100).toFixed(1)}% confidence`)
-        neuronsRef.current.forEach((neuron, index) => {
-          neuronAnimationStateRef.current.set(index, {
-            targetScale: 1,
-            targetPosition: neuron.userData.originalPosition.clone(),
-            targetColor: new THREE.Color(0x007bff),
-            targetEmissive: new THREE.Color(0x002244),
-          })
+          // Main node body - use constant size
+          const nodeSize = 8 // Constant size for all nodes
+          ctx.fillStyle = node.color || "#3b82f6"
+          ctx.beginPath()
+          ctx.arc(nodeX, nodeY, nodeSize, 0, Math.PI * 2)
+          ctx.fill()
+
+          // Active node pulse ring
+          if (node.active) {
+            const time = Date.now() * 0.005
+            const pulseRadius = nodeSize + 5 + 3 * Math.sin(time)
+            ctx.strokeStyle = `rgba(0, 255, 136, ${0.5 + 0.3 * Math.sin(time)})`
+            ctx.lineWidth = 2
+            ctx.beginPath()
+            ctx.arc(nodeX, nodeY, pulseRadius, 0, Math.PI * 2)
+            ctx.stroke()
+          }
+
+          // Node border
+          ctx.strokeStyle = node.active ? "#00ff88" : "#1e293b"
+          ctx.lineWidth = 2
+          ctx.beginPath()
+          ctx.arc(nodeX, nodeY, nodeSize, 0, Math.PI * 2)
+          ctx.stroke()
+
+          // Node ID with monospace font
+          ctx.fillStyle = "#ffffff"
+          ctx.font = "10px 'JetBrains Mono', monospace"
+          ctx.textAlign = "center"
+          ctx.fillText(node.id, nodeX, nodeY + 3)
+
+          // Error indicator
+          if (node.error && node.error > 0.3) {
+            ctx.fillStyle = "#ef4444"
+            ctx.beginPath()
+            ctx.arc(nodeX + nodeSize - 2, nodeY - nodeSize + 2, 3, 0, Math.PI * 2)
+            ctx.fill()
+          }
+
+          ctx.shadowBlur = 0
+
+          // Update node position for click detection (store centered positions)
+          node.x = nodeX
+          node.y = nodeY
         })
-        connectionDataRef.current.forEach(({ line }) => {
-          const material = line.material as THREE.LineBasicMaterial
-          material.color.setHex(0xcccccc)
-          material.opacity = 0.4
-        })
-      },
-      (data.steps?.length || 0) * 120 + 2000, // Total animation time + 2 seconds for final state
-    )
-    retrievalAnimationTimeoutsRef.current.push(finalResetTimeoutId)
-  }
+
+        // Draw selection highlight
+        if (selectedNode) {
+          const node = graphData.nodes.find((n) => n.id === selectedNode.id)
+          if (node) {
+            const nodeSize = 8 // Use same constant size
+            ctx.strokeStyle = "#fbbf24"
+            ctx.lineWidth = 3
+            ctx.beginPath()
+            ctx.arc(node.x, node.y, nodeSize + 8, 0, Math.PI * 2)
+            ctx.stroke()
+          }
+        }
+      }
+
+      requestAnimationFrame(animate)
+    }
+
+    animate()
+
+    return () => {
+      window.removeEventListener("resize", resizeCanvas)
+    }
+  }, [graphData, selectedNode])
 
   return (
-    <>
-      <OrbitControls
-        ref={controlsRef}
-        enableDamping
-        dampingFactor={0.05}
-        enableZoom
-        enableRotate
-        enablePan
-        autoRotate
-        autoRotateSpeed={1.0}
-        minDistance={8} // Adjusted minDistance for larger globe
-        maxDistance={40} // Adjusted maxDistance for larger globe
-      />
-
-      {/* Combined Top-Left Overlay */}
-      <Html fullscreen className="absolute top-4 left-4" zIndexRange={[100, 0]}>
-        <div className="bg-black/80 backdrop-blur-sm text-cyan-100 px-4 py-3 rounded-lg shadow-lg border border-cyan-500/30">
-          <div className="flex items-center space-x-3 mb-2">
-            <div className="w-2 h-2 bg-purple-400 rounded-full animate-pulse"></div>
-            <span className="text-xs font-mono">Neural Matrix Active</span>
-          </div>
-          <div className="flex items-center space-x-2">
-            {isConnected ? <Wifi className="w-4 h-4 text-green-400" /> : <WifiOff className="w-4 h-4 text-red-400" />}
-            <span className="text-xs text-cyan-300">{getConnectionStatusText()}</span>
-            {connectionHealth.reconnectAttempts > 0 && (
-              <Badge variant="outline" className="text-xs px-2 py-0 border-yellow-400 text-yellow-300">
-                Retry {connectionHealth.reconnectAttempts}
-              </Badge>
-            )}
-          </div>
-          <p className="text-xs mt-2">🖱️ Drag to rotate • 🔍 Scroll to zoom • ⚡ Auto-rotating neural matrix</p>
-        </div>
-      </Html>
-
-      {/* Top-right legends container */}
-      <Html fullscreen className="absolute top-4 right-4" zIndexRange={[100, 0]}>
-        <div className="flex flex-col space-y-2">
-          {connectionHealth.queuedMessages > 0 && (
-            <div className="bg-yellow-900/80 text-yellow-200 px-4 py-3 rounded-lg shadow-lg border border-yellow-500/30">
-              <div className="flex items-center space-x-2">
-                <AlertCircle className="w-4 h-4" />
-                <span className="text-sm">{connectionHealth.queuedMessages} queued messages</span>
-              </div>
-            </div>
-          )}
-          {localRetrievalSummaryData && (
-            <>
-              <div className="bg-black/80 backdrop-blur-sm text-cyan-100 px-4 py-3 rounded-lg shadow-lg border border-cyan-500/30">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium text-cyan-200">Confidence</span>
-                  <Badge variant="outline" className="text-cyan-200 border-cyan-300 bg-transparent">
-                    {(localRetrievalSummaryData.confidence_score * 100).toFixed(1)}%
-                  </Badge>
-                </div>
-              </div>
-              <div className="bg-black/80 backdrop-blur-sm text-cyan-100 px-4 py-3 rounded-lg shadow-lg border border-cyan-500/30">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium text-cyan-200">Steps</span>
-                  <Badge variant="outline" className="text-cyan-200 border-cyan-300 bg-transparent">
-                    {localRetrievalSummaryData.steps_count}
-                  </Badge>
-                </div>
-              </div>
-            </>
-          )}
-        </div>
-      </Html>
-    </>
+    <canvas
+      ref={canvasRef}
+      className="w-full h-full cursor-pointer"
+      onClick={handleCanvasClick}
+      style={{ background: "transparent" }}
+    />
   )
 }
 
-export function BrainVisualization({ networkId, embeddingDim, onRetrievalSummaryUpdate }: BrainVisualizationProps) {
-  const [activity, setActivity] = useState<string>("Neural Network Active")
-  const [localRetrievalSummaryData, setLocalRetrievalSummaryData] = useState<RetrievalSummaryData | null>(null)
+// 3D Visualization Component using react-force-graph-3d (Smooth Animation)
+function BrainVisualization3D({
+  networkId,
+  graphData,
+  selectedNode,
+  setSelectedNode,
+  activity,
+  isConnected,
+}: {
+  networkId: number | null
+  graphData: GraphData
+  selectedNode: SelectedNodeInfo | null
+  setSelectedNode: (node: SelectedNodeInfo | null) => void
+  activity: string
+  isConnected: boolean
+}) {
+  const fgRef = useRef<any>()
+  const [threeLoaded, setThreeLoaded] = useState(false)
 
-  // Use the enhanced WebSocket hook
-  const { isConnected, lastMessage, connectionHealth, connectionStatus } = useWebSocket(networkId, {
-    enabled: true,
-    reconnectAttempts: 5,
-    reconnectInterval: 1000,
-    heartbeatInterval: 30000,
-    heartbeatTimeout: 35000,
-  })
-
-  // Pass WebSocket updates to the parent component
   useEffect(() => {
-    if (lastMessage && lastMessage.event_type === "pattern_retrieved") {
-      onRetrievalSummaryUpdate({
-        query_text: lastMessage.data.query_text,
-        confidence_score: lastMessage.data.confidence,
-        steps_count: lastMessage.data.steps?.length || 0,
-        retrieved_hash: lastMessage.data.retrieved_hash,
-        retrieved_text: lastMessage.data.retrieved_text,
-      })
-    }
-  }, [lastMessage, onRetrievalSummaryUpdate])
+    // Dynamically load THREE.js
+    import("three").then(() => {
+      setThreeLoaded(true)
+    })
+  }, [])
 
-  const getConnectionStatusColor = useCallback(() => {
-    switch (connectionStatus) {
-      case "connected":
-        return connectionHealth.connectionHealthy ? "bg-green-400" : "bg-yellow-400"
-      case "connecting":
-        return "bg-blue-400"
-      default:
-        return "bg-red-400"
-    }
-  }, [connectionStatus, connectionHealth.connectionHealthy])
+  // Transform data for react-force-graph-3d with centering
+  const graph3DData = {
+    nodes: graphData.nodes.map((node) => ({
+      id: node.id,
+      color: node.color,
+      size: node.size || 6,
+      active: node.active,
+      error: node.error || 0,
+      type: node.type,
+      last_active_iter: node.last_active_iter || 0,
+    })),
+    links: graphData.links.map((link) => ({
+      source: link.source,
+      target: link.target,
+      color: link.color,
+      width: Math.max(0.5, link.strength * 3),
+      opacity: link.strength,
+    })),
+  }
 
-  const getConnectionStatusText = useCallback(() => {
-    if (connectionStatus === "connected" && !connectionHealth.connectionHealthy) {
-      return "Connection Issues"
-    }
-    return connectionStatus.charAt(0).toUpperCase() + connectionStatus.slice(1)
-  }, [connectionStatus, connectionHealth.connectionHealthy])
+  const handleNodeClick = useCallback(
+    (node: any) => {
+      if (node && node.x !== undefined && node.y !== undefined && node.z !== undefined) {
+        setSelectedNode({
+          id: node.id,
+          error: node.error || 0,
+          type: node.type,
+          last_active: node.last_active_iter,
+          position: { x: node.x, y: node.y, z: node.z },
+        })
+        // Smooth camera transition to the clicked node
+        fgRef.current?.cameraPosition({ x: node.x, y: node.y, z: node.z + 150 }, node, 2000)
+      }
+    },
+    [setSelectedNode],
+  )
+
+  if (graphData.nodes.length === 0 || !threeLoaded) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <div className="text-center text-blue-300">
+          <div className="relative mb-6">
+            <div className="w-16 h-16 mx-auto border-4 border-blue-400 rounded-full animate-pulse"></div>
+            <div className="absolute inset-0 w-16 h-16 mx-auto border-t-4 border-green-400 rounded-full animate-spin"></div>
+          </div>
+          <p className="text-xl font-medium font-mono mb-2">3D NETWORK INITIALIZING</p>
+          <p className="text-sm text-blue-400 font-mono">Preparing neural pathways...</p>
+        </div>
+      </div>
+    )
+  }
 
   return (
-    <div className="relative w-full h-full">
-      {" "}
-      {/* Changed to w-full h-full */}
-      <Canvas
-        className="w-full h-full bg-gradient-to-b from-gray-900 to-black rounded-lg overflow-hidden border border-gray-700 shadow-2xl"
-        gl={{ antialias: true }}
-        camera={{ fov: 75, near: 0.1, far: 1000, position: [0, 5, 18] }}
-      >
-        <BrainSceneContent
-          embeddingDim={embeddingDim}
-          lastMessage={lastMessage}
-          activity={activity}
-          setActivity={setActivity}
-          localRetrievalSummaryData={localRetrievalSummaryData}
-          setLocalRetrievalSummaryData={setLocalRetrievalSummaryData}
-          isConnected={isConnected}
-          connectionHealth={connectionHealth}
-          connectionStatus={connectionStatus}
-          getConnectionStatusColor={getConnectionStatusColor}
-          getConnectionStatusText={getConnectionStatusText}
-        />
-      </Canvas>
+    <div className="w-full h-full flex items-center justify-center">
+      <ForceGraph3D
+        ref={fgRef}
+        graphData={graph3DData}
+        width={undefined} // Let it auto-size
+        height={undefined} // Let it auto-size
+        nodeLabel="id"
+        nodeColor={(node: any) => node.color}
+        nodeVal={(node: any) => {
+          const isActive = node.active
+          return isActive ? 12 : 8 // Constant sizes, just different for active vs inactive
+        }}
+        nodeOpacity={0.9}
+        linkColor={(link: any) => link.color}
+        linkWidth={(link: any) => link.width}
+        linkOpacity={(link: any) => link.opacity}
+        onNodeClick={handleNodeClick}
+        backgroundColor="rgba(15, 23, 42, 1)"
+        showNavInfo={false}
+        controlType="orbit"
+        enableNodeDrag={false}
+        enableNavigationControls={true}
+        // Smooth animation parameters
+        d3AlphaDecay={0.005} // Slower decay for smoother animation (was 0.01)
+        d3VelocityDecay={0.15} // Lower velocity decay for smoother movement (was 0.3)
+        d3AlphaMin={0.001} // Lower minimum alpha for longer simulation
+        warmupTicks={200} // More warmup ticks for better initial positioning (was 100)
+        cooldownTicks={500} // More cooldown ticks for smoother settling (was 200)
+        // Additional smoothing parameters
+        d3ReheatSimulation={false} // Prevent jarring reheat
+        nodeRelSize={4} // Relative node size
+        linkDirectionalParticles={0} // No particles for smoother performance
+        linkDirectionalParticleSpeed={0.006} // Slower particles if enabled
+        // Camera controls for smoother interaction
+        cameraPosition={{ x: 0, y: 0, z: 400 }} // Better initial camera position
+      />
     </div>
+  )
+}
+
+export function BrainVisualization({ networkId }: BrainVisualizationProps) {
+  const [graphData, setGraphData] = useState<GraphData>({ nodes: [], links: [] })
+  const [selectedNode, setSelectedNode] = useState<SelectedNodeInfo | null>(null)
+  const [activity, setActivity] = useState("Awaiting Network Activity...")
+  const [is3D, setIs3D] = useState(false)
+  const [isRefreshing, setIsRefreshing] = useState(false)
+
+  const { isConnected, lastMessage } = useWebSocket(networkId, {
+    url: "ws://localhost:8000",
+    enabled: networkId !== null,
+  })
+
+  // Helper function to determine node color based on state
+  const getNodeColor = useCallback((node: any) => {
+    const error = node.error || 0
+    const isActive = node.last_active_iter && node.last_active_iter > 0
+
+    if (isActive) return "#00ff88" // Active nodes are bright green
+    return error > 0.5 ? "#ff4d4d" : "#4d94ff" // High error = red, low error = blue
+  }, [])
+
+  // Fetch initial graph state
+  const fetchInitialGraphState = useCallback(async () => {
+    if (!networkId) return
+    setIsRefreshing(true)
+    try {
+      const response = await fetch(`http://localhost:8000/api/brain/state/`)
+      if (!response.ok) throw new Error("Failed to fetch initial graph state")
+      const data = await response.json()
+
+      // Transform the data to match our interface - positions will be centered in rendering
+      const nodeCount = data.nodes?.length || 0
+      const transformedNodes = (data.nodes || []).map((node: any, index: number) => {
+        // Use more natural force-directed positioning - centering handled in render
+        const nodeCount = data.nodes?.length || 0
+        let x, y
+
+        if (nodeCount <= 1) {
+          // Single node at origin (will be centered in render)
+          x = 0
+          y = 0
+        } else {
+          // Use a more organic layout with some randomness
+          const angle = (index * 2 * Math.PI) / nodeCount + (Math.random() - 0.5) * 0.5
+          const radius = 80 + Math.random() * 100 // Variable radius for more natural look
+          x = Math.cos(angle) * radius + (Math.random() - 0.5) * 40
+          y = Math.sin(angle) * radius + (Math.random() - 0.5) * 40
+        }
+
+        return {
+          id: node.id.toString(),
+          x,
+          y,
+          size: 8, // Constant size for all nodes
+          color: getNodeColor(node),
+          active: node.last_active_iter > 0,
+          error: node.error || 0,
+          last_active_iter: node.last_active_iter || 0,
+          type: node.type || "sensory",
+        }
+      })
+
+      const transformedLinks = (data.links || []).map((link: any) => ({
+        source: link.source.toString(),
+        target: link.target.toString(),
+        strength: Math.max(0.1, 1 - (link.age || 0) / 50),
+        color: `rgba(100, 116, 139, ${Math.max(0.2, 1 - (link.age || 0) / 50)})`,
+        age: link.age || 0,
+      }))
+
+      setGraphData({
+        nodes: transformedNodes,
+        links: transformedLinks,
+      })
+      setActivity(`Network State Loaded - ${nodeCount} nodes`)
+    } catch (error) {
+      console.error("Error fetching graph state:", error)
+      setActivity("Error Loading State")
+    } finally {
+      setIsRefreshing(false)
+    }
+  }, [networkId, getNodeColor])
+
+  useEffect(() => {
+    fetchInitialGraphState()
+  }, [fetchInitialGraphState])
+
+  // Auto-refresh every 5 seconds
+  useEffect(() => {
+    if (!networkId) return
+
+    const interval = setInterval(() => {
+      fetchInitialGraphState()
+    }, 5000) // 5 seconds
+
+    return () => clearInterval(interval)
+  }, [networkId, fetchInitialGraphState])
+
+  // Handle WebSocket messages - FIXED: Removed graphData.nodes from dependencies
+  useEffect(() => {
+    if (!lastMessage) return
+
+    if (lastMessage.type === "graph_state_update") {
+      const payload = lastMessage.payload
+      if (payload) {
+        const nodeCount = payload.nodes?.length || 0
+        const transformedNodes = (payload.nodes || []).map((node: any, index: number) => {
+          // Maintain existing positions if node exists, otherwise create new natural position
+          const existingNode = graphData.nodes.find((n) => n.id === node.id.toString())
+          let x, y
+
+          if (existingNode) {
+            // Keep existing position (relative to center)
+            x = existingNode.x
+            y = existingNode.y
+          } else {
+            // New node - calculate more natural position
+            const nodeCount = payload.nodes?.length || 0
+            const angle = (index * 2 * Math.PI) / nodeCount + (Math.random() - 0.5) * 0.5
+            const radius = 80 + Math.random() * 100
+            x = Math.cos(angle) * radius + (Math.random() - 0.5) * 40
+            y = Math.sin(angle) * radius + (Math.random() - 0.5) * 40
+          }
+
+          return {
+            id: node.id.toString(),
+            x,
+            y,
+            size: 8, // Constant size for all nodes
+            color: getNodeColor(node),
+            active: node.last_active_iter > 0,
+            error: node.error || 0,
+            last_active_iter: node.last_active_iter || 0,
+            type: node.type || "sensory",
+          }
+        })
+
+        const transformedLinks = (payload.links || []).map((link: any) => ({
+          source: link.source.toString(),
+          target: link.target.toString(),
+          strength: Math.max(0.1, 1 - (link.age || 0) / 50),
+          color: `rgba(100, 116, 139, ${Math.max(0.2, 1 - (link.age || 0) / 50)})`,
+          age: link.age || 0,
+        }))
+
+        setGraphData({
+          nodes: transformedNodes,
+          links: transformedLinks,
+        })
+        setActivity(`Graph Updated - ${nodeCount} nodes`)
+      }
+    }
+  }, [lastMessage, getNodeColor])
+
+  // Handle canvas click for node selection (with centered coordinates)
+  const handleCanvasClick = useCallback(
+    (event: React.MouseEvent<HTMLCanvasElement>) => {
+      const canvas = event.currentTarget
+      if (!canvas) return
+
+      const rect = canvas.getBoundingClientRect()
+      const x = event.clientX - rect.left
+      const y = event.clientY - rect.top
+
+      // Find clicked node (nodes are already positioned with centering offset)
+      const clickedNode = graphData.nodes.find((node) => {
+        const distance = Math.sqrt((node.x - x) ** 2 + (node.y - y) ** 2)
+        return distance <= 8 + 5 // Use constant size (8) + click tolerance (5)
+      })
+
+      if (clickedNode) {
+        setSelectedNode({
+          id: clickedNode.id,
+          error: clickedNode.error || 0,
+          type: clickedNode.type,
+          last_active: clickedNode.last_active_iter,
+          position: { x: clickedNode.x, y: clickedNode.y },
+        })
+      } else {
+        setSelectedNode(null)
+      }
+    },
+    [graphData.nodes],
+  )
+
+  return (
+    <Card className="w-full h-full bg-slate-900 border-slate-800 overflow-hidden shadow-2xl">
+      <CardContent className="p-0 h-full relative">
+        {/* Integrated Controls Panel - Top */}
+        <div className="absolute top-4 left-4 right-4 z-10 flex items-center justify-between">
+          {/* Left Side - Activity Status */}
+          <div className="text-blue-300 bg-slate-900/90 backdrop-blur-md px-4 py-2 rounded-lg border border-blue-400/40 shadow-lg">
+            <p className="text-sm font-medium font-mono">{activity}</p>
+          </div>
+
+          {/* Right Side - Controls */}
+          <div className="flex items-center space-x-2">
+            {/* 2D/3D Toggle */}
+            <Button
+              onClick={() => setIs3D(!is3D)}
+              variant="outline"
+              size="sm"
+              className="bg-slate-800/90 border-blue-400/40 text-blue-300 hover:bg-slate-700/90 hover:border-blue-300/60 transition-all duration-200 backdrop-blur-md"
+            >
+              {is3D ? (
+                <>
+                  <Layers className="w-4 h-4 mr-2" />
+                  2D
+                </>
+              ) : (
+                <>
+                  <Box className="w-4 h-4 mr-2" />
+                  3D
+                </>
+              )}
+            </Button>
+
+            {/* Manual Refresh */}
+            <Button
+              onClick={fetchInitialGraphState}
+              variant="outline"
+              size="sm"
+              disabled={isRefreshing}
+              className="bg-slate-800/90 border-blue-400/40 text-blue-300 hover:bg-slate-700/90 hover:border-blue-300/60 transition-all duration-200 backdrop-blur-md"
+            >
+              <RefreshCw className={`w-4 h-4 mr-2 ${isRefreshing ? "animate-spin" : ""}`} />
+              Refresh
+            </Button>
+
+            {/* Connection Status */}
+            <div className="flex items-center space-x-2 text-blue-300 bg-slate-900/90 backdrop-blur-md px-3 py-2 rounded-lg border border-blue-400/40 shadow-lg">
+              {isConnected ? <Wifi className="w-4 h-4 text-green-400" /> : <WifiOff className="w-4 h-4 text-red-400" />}
+              <span className="text-xs font-mono">{isConnected ? "Live" : "Offline"}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Bottom Stats and Info */}
+        <div className="absolute bottom-4 left-4 right-4 z-10 flex items-end justify-between">
+          {/* Left Side - Selected Node Info */}
+          {selectedNode && (
+            <div className="bg-slate-900/95 text-blue-300 p-3 rounded-lg shadow-2xl text-sm border border-blue-400/40 backdrop-blur-sm">
+              <p className="font-mono font-bold">Node: {selectedNode.id}</p>
+              <p className="font-mono text-xs text-blue-400">Error: {selectedNode.error.toFixed(4)}</p>
+              {selectedNode.type && <p className="font-mono text-xs text-green-400">Type: {selectedNode.type}</p>}
+              {selectedNode.last_active && (
+                <p className="font-mono text-xs text-yellow-400">Last Active: {selectedNode.last_active}</p>
+              )}
+              <p className="font-mono text-xs text-purple-400">
+                {is3D ? (
+                  <>
+                    3D Pos: ({selectedNode.position.x?.toFixed(1)}, {selectedNode.position.y?.toFixed(1)},{" "}
+                    {selectedNode.position.z?.toFixed(1)})
+                  </>
+                ) : (
+                  <>
+                    2D Pos: ({selectedNode.position.x?.toFixed(1)}, {selectedNode.position.y?.toFixed(1)})
+                  </>
+                )}
+              </p>
+            </div>
+          )}
+
+          {/* Right Side - Graph Stats */}
+          <div className="flex items-center space-x-2">
+            <Badge
+              variant="outline"
+              className="bg-slate-800/90 text-slate-200 border-slate-700 font-mono shadow-lg backdrop-blur-md"
+            >
+              {graphData.nodes.length} nodes • {graphData.links.length} edges
+            </Badge>
+            <Badge
+              variant="outline"
+              className="bg-green-500/20 text-green-400 border-green-500/30 font-mono shadow-lg backdrop-blur-md"
+            >
+              {graphData.nodes.filter((n) => n.active).length} active
+            </Badge>
+            <Badge
+              variant="outline"
+              className="bg-red-500/20 text-red-400 border-red-500/30 font-mono shadow-lg backdrop-blur-md"
+            >
+              {graphData.nodes.filter((n) => (n.error || 0) > 0.3).length} errors
+            </Badge>
+          </div>
+        </div>
+
+        {/* Render appropriate visualization */}
+        {is3D ? (
+          <BrainVisualization3D
+            networkId={networkId}
+            graphData={graphData}
+            selectedNode={selectedNode}
+            setSelectedNode={setSelectedNode}
+            activity={activity}
+            isConnected={isConnected}
+          />
+        ) : (
+          <BrainVisualization2D
+            networkId={networkId}
+            graphData={graphData}
+            selectedNode={selectedNode}
+            setSelectedNode={setSelectedNode}
+            activity={activity}
+            isConnected={isConnected}
+            handleCanvasClick={handleCanvasClick}
+          />
+        )}
+
+        {/* No Network State */}
+        {!networkId && (
+          <div className="absolute inset-0 flex items-center justify-center bg-slate-900/80 backdrop-blur-sm">
+            <div className="text-center text-blue-300">
+              <AlertCircle className="w-16 h-16 mx-auto mb-6 text-blue-400" />
+              <p className="text-xl font-medium font-mono mb-2">NO NETWORK SELECTED</p>
+              <p className="text-sm text-blue-400 font-mono">Initialize neural interface to begin</p>
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   )
 }

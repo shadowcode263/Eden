@@ -1,248 +1,249 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react" // Import useCallback
-import { BrainVisualization } from "@/components/brain-visualization"
-import { CreateNetworkModal } from "@/components/create-network-modal"
-import { BrainControlPanel } from "@/components/brain-control-panel"
+import { useState, useEffect } from "react"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Brain, Plus, Settings, GitBranch, Zap } from "lucide-react"
-import { NeuronFiringDisplay } from "@/components/neuron-firing-display"
-import { Badge } from "@/components/ui/badge" // Import Badge
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Badge } from "@/components/ui/badge"
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
+import { Brain, Plus, Settings, Info, BookOpen, Gamepad2 } from "lucide-react"
+import { toast } from "@/hooks/use-toast"
+import { Toaster } from "@/components/ui/toaster"
+import { BrainVisualization } from "@/components/brain-visualization"
+import { TextTrainingPanel } from "@/components/text-training-panel"
+import { GameTrainingPanel } from "@/components/game-training-panel"
+import { NetworkDetails } from "@/components/network-details"
+import { CreateNetworkModal } from "@/components/create-network-modal"
 
 interface Network {
   id: number
   name: string
-  embedding_dim: number
-  beta: number
-  learning_rate: number
-  total_patterns: number
-  total_retrievals: number
-  merkle_root: string | null
+  description: string
+  is_active: boolean
   created_at: string
 }
 
-interface RetrievalSummaryData {
-  query_text: string
-  confidence_score: number
-  steps_count: number
-  retrieved_hash: string
-  retrieved_text: string
-}
-
-export default function HomePage() {
+export default function Home() {
   const [networks, setNetworks] = useState<Network[]>([])
-  const [selectedNetwork, setSelectedNetwork] = useState<Network | null>(null)
-  const [showCreateModal, setShowCreateModal] = useState(false)
-  const [loading, setLoading] = useState(true)
-  const [retrievalSummaryData, setRetrievalSummaryData] = useState<RetrievalSummaryData | null>(null)
+  const [activeNetwork, setActiveNetwork] = useState<Network | null>(null)
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false)
+  const [isNetworkDetailsOpen, setIsNetworkDetailsOpen] = useState(false)
+  const [refreshTrigger, setRefreshTrigger] = useState(0)
 
   useEffect(() => {
     fetchNetworks()
-  }, [])
+  }, [refreshTrigger])
 
   const fetchNetworks = async () => {
     try {
-      const response = await fetch("http://localhost:8000/api/networks/")
-      const data = await response.json()
-      setNetworks(data)
-      if (data.length > 0 && !selectedNetwork) {
-        setSelectedNetwork(data[0])
-      } else if (selectedNetwork) {
-        const updatedSelected = data.find((n) => n.id === selectedNetwork.id)
-        if (updatedSelected) {
-          setSelectedNetwork(updatedSelected)
-        } else if (data.length > 0) {
-          setSelectedNetwork(data[0])
-        } else {
-          setSelectedNetwork(null)
-        }
+      const response = await fetch("http://localhost:8000/api/brain/networks/")
+      if (response.ok) {
+        const data = await response.json()
+        setNetworks(data)
+        const active = data.find((n: Network) => n.is_active)
+        setActiveNetwork(active || null)
       }
     } catch (error) {
-      console.error("Error fetching networks:", error)
-    } finally {
-      setLoading(false)
+      console.error("Failed to fetch networks:", error)
     }
   }
 
-  const handleNetworkCreated = (network: Network) => {
-    setNetworks((prev) => [network, ...prev])
-    setSelectedNetwork(network)
-    setShowCreateModal(false)
+  const handleSetActiveNetwork = async (networkId: number) => {
+    try {
+      const response = await fetch(`http://localhost:8000/api/brain/networks/${networkId}/set-active/`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ action: "set_active" }),
+      })
+      if (response.ok) {
+        toast({ title: "Network Activated", description: "Network is now active." })
+        setRefreshTrigger((prev) => prev + 1)
+      } else {
+        const errorData = await response.json()
+        throw new Error(errorData.error || "Failed to activate network")
+      }
+    } catch (error) {
+      console.error("Error activating network:", error)
+      toast({
+        title: "Error",
+        description: error instanceof Error ? error.message : "Failed to activate network.",
+        variant: "destructive",
+      })
+    }
   }
 
-  const handleNetworkUpdated = (updatedNetwork: Network) => {
-    setNetworks((prev) => prev.map((n) => (n.id === updatedNetwork.id ? updatedNetwork : n)))
-    setSelectedNetwork(updatedNetwork)
-  }
-
-  // Memoize the callback to prevent unnecessary re-renders of BrainVisualization
-  const handleRetrievalSummaryUpdate = useCallback((data: RetrievalSummaryData) => {
-    setRetrievalSummaryData(data)
-  }, [])
-
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-white flex items-center justify-center">
-        <div className="text-center">
-          <Brain className="w-20 h-20 text-blue-600 animate-pulse mx-auto mb-6" />
-          <p className="text-xl text-gray-700">Initializing Neural Networks...</p>
-        </div>
-      </div>
-    )
+  const handleRefresh = () => {
+    setRefreshTrigger((prev) => prev + 1)
   }
 
   return (
-    <div className="min-h-screen bg-white text-foreground">
+    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
       {/* Header */}
-      <header className="bg-white border-b border-gray-200 sticky top-0 z-50 shadow-sm">
-        <div className="w-full px-6 py-4">
+      <header className="border-b border-slate-800/50 bg-slate-900/80 backdrop-blur-xl supports-[backdrop-filter]:bg-slate-900/80 shadow-2xl">
+        <div className="px-6 py-4">
           <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-4">
-              <div className="p-2 bg-blue-100 rounded-lg">
-                <Brain className="w-8 h-8 text-blue-600" />
+            <div className="flex items-center space-x-3">
+              <div className="relative">
+                <Brain className="w-8 h-8 text-blue-400" />
+                <div className="absolute inset-0 w-8 h-8 text-blue-400 animate-pulse opacity-50"></div>
               </div>
               <div>
-                <h1 className="text-2xl font-bold text-gray-900">Hopfield Brain</h1>
-                <p className="text-sm text-gray-600">Adaptive Neural Memory System</p>
+                <h1 className="text-2xl font-bold bg-gradient-to-r from-blue-400 to-cyan-400 bg-clip-text text-transparent">
+                  STAG Brain Network
+                </h1>
+                <p className="text-sm text-slate-400 font-mono">Spatio-Temporal Associative Graph Interface</p>
               </div>
             </div>
-
             <div className="flex items-center space-x-4">
-              <select
-                value={selectedNetwork?.id || ""}
-                onChange={(e) => {
-                  const network = networks.find((n) => n.id === Number.parseInt(e.target.value))
-                  setSelectedNetwork(network || null)
-                  setRetrievalSummaryData(null) // Clear retrieval summary when network changes
-                }}
-                className="px-4 py-2 border border-gray-300 rounded-lg text-gray-900 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              >
-                <option value="">Select Network</option>
-                {networks.map((network) => (
-                  <option key={network.id} value={network.id}>
-                    {network.name} ({network.total_patterns} patterns)
-                  </option>
-                ))}
-              </select>
+              <div className="flex items-center space-x-2">
+                <span className="text-sm font-medium text-slate-300">Active Network:</span>
+                <Select
+                  value={activeNetwork?.id.toString() || ""}
+                  onValueChange={(value) => handleSetActiveNetwork(Number(value))}
+                >
+                  <SelectTrigger className="w-48 bg-slate-800/50 border-slate-700 text-slate-200 hover:bg-slate-700/50 transition-all duration-200">
+                    <SelectValue placeholder="Select network">
+                      {activeNetwork ? (
+                        <div className="flex items-center space-x-2">
+                          <span>{activeNetwork.name}</span>
+                          <Badge
+                            variant="secondary"
+                            className="text-xs bg-green-500/20 text-green-400 border-green-500/30"
+                          >
+                            Active
+                          </Badge>
+                        </div>
+                      ) : (
+                        "No active network"
+                      )}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent className="bg-slate-800 border-slate-700">
+                    {networks.map((network) => (
+                      <SelectItem
+                        key={network.id}
+                        value={network.id.toString()}
+                        className="text-slate-200 hover:bg-slate-700"
+                      >
+                        <div className="flex items-center justify-between w-full">
+                          <span>{network.name}</span>
+                          {network.is_active && (
+                            <Badge
+                              variant="secondary"
+                              className="ml-2 text-xs bg-green-500/20 text-green-400 border-green-500/30"
+                            >
+                              Active
+                            </Badge>
+                          )}
+                        </div>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
 
-              <Button onClick={() => setShowCreateModal(true)} className="bg-blue-600 hover:bg-blue-700">
+              {/* Network Details Dialog */}
+              <Dialog open={isNetworkDetailsOpen} onOpenChange={setIsNetworkDetailsOpen}>
+                <DialogTrigger asChild>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={!activeNetwork}
+                    className="bg-slate-800/50 border-slate-700 text-slate-200 hover:bg-slate-700/50"
+                  >
+                    <Info className="w-4 h-4 mr-2" />
+                    Network Details
+                  </Button>
+                </DialogTrigger>
+                <DialogContent className="max-w-4xl max-h-[80vh] overflow-y-auto bg-slate-900 border-slate-700">
+                  <DialogHeader>
+                    <DialogTitle className="flex items-center gap-2 text-slate-200">
+                      <Settings className="w-5 h-5 text-blue-400" />
+                      Network Details
+                      {activeNetwork && (
+                        <Badge variant="secondary" className="bg-green-500/20 text-green-400 border-green-500/30">
+                          Active
+                        </Badge>
+                      )}
+                    </DialogTitle>
+                  </DialogHeader>
+                  <NetworkDetails networkId={activeNetwork?.id || null} onRefresh={handleRefresh} />
+                </DialogContent>
+              </Dialog>
+
+              <Button
+                onClick={() => setIsCreateModalOpen(true)}
+                size="sm"
+                className="bg-blue-600 hover:bg-blue-700 text-white shadow-lg"
+              >
                 <Plus className="w-4 h-4 mr-2" />
-                New Network
+                Create Network
               </Button>
             </div>
           </div>
         </div>
       </header>
 
-      {/* Main Content Area */}
-      <main className="w-full py-8 px-6">
-        {!selectedNetwork ? (
-          <section className="text-center py-20">
-            <div className="p-8 bg-gray-50 rounded-xl border border-gray-200 max-w-md mx-auto shadow-lg">
-              <Brain className="w-24 h-24 text-gray-400 mx-auto mb-6" />
-              <h2 className="text-2xl font-bold text-gray-900 mb-4">No Network Selected</h2>
-              <p className="text-gray-600 mb-8">Create or select a neural network to get started</p>
-              <Button onClick={() => setShowCreateModal(true)} size="lg" className="bg-blue-600 hover:bg-blue-700">
-                <Plus className="w-5 h-5 mr-2" />
-                Create Your First Network
-              </Button>
+      {/* Main Content */}
+      <main className="px-6 py-6 space-y-6">
+        {/* Two Panel Layout - Equal Heights */}
+        {activeNetwork ? (
+          <div className="flex h-[85vh] gap-6">
+            {/* Left Panel - Brain Visualization (50% width) */}
+            <div className="w-1/2 h-full">
+              <BrainVisualization networkId={activeNetwork.id} />
             </div>
-          </section>
-        ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-10 gap-6 h-[calc(100vh-160px)]">
-            {/* Left Column: Neural Network Visualization */}
-            <section className="lg:col-span-7 h-full flex flex-col">
-              <Card className="shadow-lg border-gray-200 bg-white text-foreground h-full flex flex-col">
-                <CardHeader className="pb-4">
-                  <div className="flex items-center justify-between flex-wrap gap-4">
-                    <div className="flex items-center">
-                      <Brain className="w-6 h-6 mr-3 text-blue-600" />
-                      <div>
-                        <CardTitle className="text-xl text-gray-900">Neural Network Visualization</CardTitle>
-                        <CardDescription className="text-gray-600">
-                          Real-time 3D visualization of {selectedNetwork.name}
-                        </CardDescription>
-                      </div>
-                    </div>
-                    <div className="flex items-center space-x-3 flex-wrap gap-2">
-                      {retrievalSummaryData?.retrieved_text && (
-                        <Badge variant="outline" className="text-purple-700 border-purple-300 bg-purple-100">
-                          Retrieved: "{retrievalSummaryData.retrieved_text}"
-                        </Badge>
-                      )}
-                      {retrievalSummaryData?.confidence_score !== undefined && (
-                        <Badge variant="outline" className="text-green-700 border-green-300 bg-green-100">
-                          Confidence: {(retrievalSummaryData.confidence_score * 100).toFixed(1)}%
-                        </Badge>
-                      )}
-                      {retrievalSummaryData?.steps_count !== undefined && (
-                        <Badge variant="outline" className="text-orange-700 border-orange-300 bg-orange-100">
-                          Steps: {retrievalSummaryData.steps_count}
-                        </Badge>
-                      )}
-                      <Badge
-                        variant="outline"
-                        className="border-gray-300 text-gray-700 bg-gray-100 hover:bg-gray-100 hover:text-gray-900"
-                      >
-                        <GitBranch className="w-4 h-4 mr-2" />
-                        {selectedNetwork.merkle_root ? `${selectedNetwork.merkle_root}` : "N/A"}
-                      </Badge>
-                      <div className="px-3 py-1 bg-blue-100 rounded-full text-blue-700 text-sm font-medium border border-blue-200">
-                        {selectedNetwork.total_patterns} patterns
-                      </div>
-                    </div>
-                  </div>
-                </CardHeader>
-                <CardContent className="flex-grow p-0">
-                  <BrainVisualization
-                    networkId={selectedNetwork.id}
-                    embeddingDim={selectedNetwork.embedding_dim}
-                    onRetrievalSummaryUpdate={handleRetrievalSummaryUpdate}
-                  />
-                </CardContent>
-              </Card>
-            </section>
-            {/* Right Column: Controls and Stats */}
-            <section className="lg:col-span-3 space-y-6 overflow-y-auto pr-2 custom-scrollbar">
-              {/* Brain Control Panel */}
-              <Card className="shadow-lg border-gray-200 bg-white text-foreground">
-                <CardHeader>
-                  <CardTitle className="flex items-center text-gray-900">
-                    <Settings className="w-5 h-5 mr-2 text-blue-600" />
-                    Brain Control Panel
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <BrainControlPanel network={selectedNetwork} onNetworkUpdated={handleNetworkUpdated} />
-                </CardContent>
-              </Card>
-              {/* Neuron Firing Display */}
-              <Card className="shadow-lg border-gray-200 bg-white text-foreground">
-                <CardHeader className="pb-4">
-                  <CardTitle className="flex items-center text-gray-900">
-                    <Zap className="w-5 h-5 mr-2 text-red-600" />
-                    Neuron Firing Pattern
-                  </CardTitle>
-                  <CardDescription className="text-gray-600">
-                    Neurons that fired during the last retrieval
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="w-full">
-                  <NeuronFiringDisplay networkId={selectedNetwork.id} />
-                </CardContent>
-              </Card>
-            </section>
+
+            {/* Right Panel - Training Interface (50% width) */}
+            <div className="w-1/2 h-full">
+              <div className="h-full flex flex-col space-y-4">
+                {/* Text Training Panel */}
+                <Card className="flex-1 bg-gradient-to-br from-slate-900/90 to-slate-800/90 border-slate-700/50 shadow-2xl backdrop-blur-sm">
+                  <CardContent className="flex-1 overflow-y-auto">
+                    <TextTrainingPanel networkId={activeNetwork.id} onAction={handleRefresh} />
+                  </CardContent>
+                </Card>
+
+                {/* Game Training Panel */}
+                <Card className="flex-1 bg-gradient-to-br from-slate-800/90 to-slate-900/90 border-slate-700/50 shadow-2xl backdrop-blur-sm">
+                  <CardContent className="flex-1 overflow-y-auto">
+                    <GameTrainingPanel networkId={activeNetwork.id} />
+                  </CardContent>
+                </Card>
+              </div>
+            </div>
           </div>
+        ) : (
+          <Card className="w-full h-[85vh] bg-slate-900/80 border-slate-800 shadow-2xl backdrop-blur-sm">
+            <CardContent className="flex flex-col items-center justify-center h-full">
+              <div className="relative mb-6">
+                <Brain className="w-16 h-16 text-slate-400" />
+                <div className="absolute inset-0 w-16 h-16 text-blue-400 animate-pulse opacity-50"></div>
+              </div>
+              <h3 className="text-lg font-semibold mb-2 text-slate-200">No Active Network</h3>
+              <p className="text-slate-400 text-center mb-4 font-mono">
+                Create a new network or select an existing one to begin neural processing.
+              </p>
+              <Button
+                onClick={() => setIsCreateModalOpen(true)}
+                className="bg-blue-600 hover:bg-blue-700 text-white shadow-lg"
+              >
+                <Plus className="w-4 h-4 mr-2" />
+                Create Network
+              </Button>
+            </CardContent>
+          </Card>
         )}
       </main>
 
-      {/* Modals */}
       <CreateNetworkModal
-        isOpen={showCreateModal}
-        onClose={() => setShowCreateModal(false)}
-        onNetworkCreated={handleNetworkCreated}
+        isOpen={isCreateModalOpen}
+        onClose={() => setIsCreateModalOpen(false)}
+        onNetworkCreated={handleRefresh}
       />
+      <Toaster />
     </div>
   )
 }

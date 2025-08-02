@@ -91,7 +91,7 @@ export function useWebSocket(networkId: number | null, options: WebSocketOptions
       }
 
       // Handle brain network updates
-      if (data.type === "network_update") {
+      if (data.type === "graph_state_update" || data.type === "network_update") {
         setLastMessage(data)
         setError(null)
       }
