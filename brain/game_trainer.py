@@ -1,368 +1,237 @@
-import numpy as np
-import random
 import time
-from typing import Dict, List, Tuple, Optional
-from collections import defaultdict, deque
-import threading
-import json
+import random
+import argparse
+import os
+import sys
+from typing import Dict, List, Optional, Callable
 
-from .environments import EnvironmentManager, BaseEnvironment, EnvironmentState
-from .models import BrainNetwork
+# Add the project root to the Python path to allow for Django setup
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# --- Django Setup ---
+# This must be configured before importing any Django models
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
+import django
+from django.utils import timezone
 
-class ControlLearner:
-    """Q-Learning agent for game control"""
+django.setup()
+# --- End Django Setup ---
 
-    def __init__(self, state_size: int, action_size: int, learning_rate: float = 0.1):
-        self.state_size = state_size
-        self.action_size = action_size
-        self.learning_rate = learning_rate
-        self.discount_factor = 0.95
-        self.epsilon = 1.0
-        self.epsilon_min = 0.01
-        self.epsilon_decay = 0.995
-
-        # Q-table for discrete states
-        self.q_table = defaultdict(lambda: np.zeros(action_size))
-        self.experience_buffer = deque(maxlen=10000)
-
-    def _discretize_state(self, state: np.ndarray) -> str:
-        """Convert continuous state to discrete string for Q-table"""
-        # Simple discretization - round to 2 decimal places
-        discrete_state = np.round(state, 2)
-        return str(discrete_state.tolist())
-
-    def choose_action(self, state: np.ndarray, training: bool = True) -> int:
-        """Choose action using epsilon-greedy policy"""
-        state_key = self._discretize_state(state)
-
-        if training and random.random() < self.epsilon:
-            return random.randint(0, self.action_size - 1)
-        else:
-            return np.argmax(self.q_table[state_key])
-
-    def learn(self, state: np.ndarray, action: int, reward: float,
-              next_state: np.ndarray, done: bool):
-        """Update Q-table using Q-learning"""
-        state_key = self._discretize_state(state)
-        next_state_key = self._discretize_state(next_state)
-
-        # Q-learning update
-        current_q = self.q_table[state_key][action]
-        if done:
-            target_q = reward
-        else:
-            target_q = reward + self.discount_factor * np.max(self.q_table[next_state_key])
-
-        self.q_table[state_key][action] = current_q + self.learning_rate * (target_q - current_q)
-
-        # Decay epsilon
-        if self.epsilon > self.epsilon_min:
-            self.epsilon *= self.epsilon_decay
-
-    def save_experience(self, state: np.ndarray, action: int, reward: float,
-                        next_state: np.ndarray, done: bool):
-        """Save experience for potential replay"""
-        self.experience_buffer.append((state, action, reward, next_state, done))
+from .environments import EnvironmentManager, BaseEnvironment
+from .models import BrainNetwork, TrainingSession
+from .services import STAGNetworkService
 
 
 class GameTrainer:
-    """Main trainer class that integrates with STAG network"""
+    """
+    Acts as a "Coach" to orchestrate training and evaluation sessions for a STAG network.
+    This class does not contain any learning logic itself. It is a client that
+    delegates all brain functions to the STAGNetworkService and records the results.
+    """
 
     def __init__(self, network_id: int):
+        """
+        Initializes the GameTrainer for a specific BrainNetwork.
+
+        Args:
+            network_id (int): The primary key of the BrainNetwork to be trained.
+
+        Raises:
+            BrainNetwork.DoesNotExist: If the network with the given ID is not found.
+        """
         self.network_id = network_id
-        self.network_model = None
-        self.stag_service = None
+        # Eagerly load the network model to ensure it exists.
+        self.network_model = BrainNetwork.objects.get(id=self.network_id)
         self.env_manager = EnvironmentManager()
-        self.control_learner = None
-        self.visualization_enabled = True
-        self.training_stats = {
-            'episodes_completed': 0,
-            'total_reward': 0,
-            'success_count': 0,
-            'episode_rewards': [],
-            'episode_successes': []
-        }
 
-        # Initialize network connection
-        self._initialize_network()
+        # The service is now loaded on-demand by the methods that need it.
+        # This avoids keeping a potentially stale service instance in memory.
+        print(f"GameTrainer initialized for network: '{self.network_model.name}' (ID: {self.network_id})")
 
-    def _initialize_network(self):
-        """Initialize connection to STAG network"""
+    def _get_service(self) -> STAGNetworkService:
+        """
+        Lazy-loads and returns the STAGNetworkService instance.
+        This ensures the service is always fresh for each operation.
+        """
+        # In a real-world scenario, a more sophisticated service cache might be used.
+        # For this refactoring, creating a new instance is clean and safe.
+        return STAGNetworkService(self.network_id)
+
+    def train(self, environment_name: str, episodes: int, max_steps_per_episode: int = 200) -> TrainingSession:
+        """
+        Runs a full training session for the network on a given environment.
+
+        This method creates a TrainingSession record, invokes the STAG service to
+        run the training, and then saves the final results to the database.
+
+        Args:
+            environment_name (str): The name of the environment to train on.
+            episodes (int): The number of episodes to run.
+            max_steps_per_episode (int): The maximum steps allowed per episode.
+
+        Returns:
+            TrainingSession: The completed and saved training session object.
+        """
+        print(f"Starting training session on '{environment_name}' for {episodes} episodes...")
+        service = self._get_service()
+        env = self.env_manager.get_env(environment_name)
+
+        session = TrainingSession.objects.create(
+            network=self.network_model,
+            environment_name=environment_name,
+            parameters={'episodes': episodes, 'max_steps': max_steps_per_episode},
+            status=TrainingSession.Status.RUNNING
+        )
+
         try:
-            self.network_model = BrainNetwork.objects.get(id=self.network_id)
+            # The train_on_env method from the service is a generator.
+            # We consume it fully to execute the training.
+            training_results = list(service.train_on_env(env, episodes, max_steps_per_episode))
 
-            # Try to get STAG service if available
-            try:
-                from .services import STAGNetworkService
-                self.stag_service = STAGNetworkService(self.network_id)
-                print(f"Connected to STAG network {self.network_id}")
-            except Exception as e:
-                print(f"STAG service not available, using fallback Q-learning: {e}")
-                self.stag_service = None
+            session.status = TrainingSession.Status.COMPLETED
+            session.results = {"episodes": training_results}
+            print("Training session completed successfully.")
 
-        except BrainNetwork.DoesNotExist:
-            print(f"Network {self.network_id} not found, using standalone mode")
-            self.network_model = None
-            self.stag_service = None
+        except Exception as e:
+            session.status = TrainingSession.Status.FAILED
+            session.results = {"error": str(e)}
+            print(f"ERROR: Training session failed: {e}")
+            # Re-raise the exception so the caller (e.g., a view) can handle it.
+            raise e
 
-    def train_single_episode(self, environment_name: str) -> Dict:
-        """Train for a single episode"""
-        env = self.env_manager.create_environment(environment_name)
+        finally:
+            # Ensure the session is always saved, even on failure.
+            # FIX: Use timezone.now() to get a datetime object for the DateTimeField.
+            session.end_time = timezone.now()
+            session.save()
 
-        # Initialize control learner if not exists
-        if self.control_learner is None:
-            self.control_learner = ControlLearner(
-                env.get_state_size(),
-                env.get_action_size()
-            )
+        return session
 
-        # Reset environment and get initial state
-        env_state = env.reset()
-        state = env_state.observation
-        total_reward = 0
-        steps = 0
-        max_steps = 1000
+    def evaluate(self, environment_name: str, episodes: int, max_steps_per_episode: int = 200) -> Dict:
+        """
+        Evaluates the network's current performance without any learning.
 
-        while not env_state.done and steps < max_steps:
-            # Choose action
-            if self.stag_service:
-                # Use STAG network for action selection
-                action_idx = self._get_stag_action(state, env)
-            else:
-                # Use Q-learning fallback
-                action_idx = self.control_learner.choose_action(state, training=True)
+        Args:
+            environment_name (str): The name of the environment for evaluation.
+            episodes (int): The number of episodes to run for the evaluation.
+            max_steps_per_episode (int): The maximum steps allowed per episode.
 
-            # Convert action index to action name
-            action = env.action_space[action_idx]
+        Returns:
+            Dict: A dictionary containing aggregated evaluation results.
+        """
+        print(f"Starting evaluation on '{environment_name}' for {episodes} episodes...")
+        service = self._get_service()
+        env = self.env_manager.get_env(environment_name)
 
-            # Take action
-            env_state = env.step(action)
-            next_state = env_state.observation
-            reward = env_state.reward
-            done = env_state.done
+        # The service should ideally have a dedicated evaluation method.
+        # For now, we can simulate it by running train_on_env but telling the service
+        # not to be in a training state (though the current service refactor handles this).
+        # A future improvement would be `service.evaluate_on_env(...)`.
 
-            total_reward += reward
+        # For this implementation, we assume the service's `train_on_env` can be
+        # run without causing learning if `is_training` is False.
+        service.is_training = False  # Explicitly set to evaluation mode
 
-            # Learn from experience
-            if self.stag_service:
-                self._update_stag_network(state, action_idx, reward, next_state, done)
-            else:
-                self.control_learner.learn(state, action_idx, reward, next_state, done)
+        all_rewards = []
+        success_count = 0
 
-            state = next_state
-            steps += 1
-
-            if self.visualization_enabled and steps % 10 == 0:
-                print(env.render())
-                time.sleep(0.1)
-
-        # Update statistics
-        success = total_reward > 0
-        self.training_stats['episodes_completed'] += 1
-        self.training_stats['total_reward'] += total_reward
-        self.training_stats['episode_rewards'].append(total_reward)
-        self.training_stats['episode_successes'].append(success)
-        if success:
-            self.training_stats['success_count'] += 1
-
-        return {
-            'episode': self.training_stats['episodes_completed'],
-            'total_reward': total_reward,
-            'steps': steps,
-            'success': success,
-            'info': env_state.info
-        }
-
-    def train_multiple_episodes(self, episodes: int, environment_name: str):
-        """Train for multiple episodes"""
-        print(f"Starting training on {environment_name} for {episodes} episodes...")
-
-        for episode in range(episodes):
-            result = self.train_single_episode(environment_name)
-
-            if episode % 10 == 0:
-                avg_reward = np.mean(self.training_stats['episode_rewards'][-10:])
-                success_rate = np.mean(self.training_stats['episode_successes'][-10:])
-                print(f"Episode {episode}: Avg Reward: {avg_reward:.2f}, Success Rate: {success_rate:.2f}")
-
-        print(f"Training completed! Total episodes: {episodes}")
-
-    def evaluate_performance(self, num_episodes: int, environment_name: str) -> Dict:
-        """Evaluate the trained agent"""
-        print(f"Evaluating performance on {environment_name} for {num_episodes} episodes...")
-
-        rewards = []
-        successes = []
-
-        # Temporarily disable exploration for evaluation
-        original_epsilon = getattr(self.control_learner, 'epsilon', 0) if self.control_learner else 0
-        if self.control_learner:
-            self.control_learner.epsilon = 0
-
-        for episode in range(num_episodes):
-            env = self.env_manager.create_environment(environment_name)
-            env_state = env.reset()
-            state = env_state.observation
-            total_reward = 0
+        for _ in range(episodes):
+            state = env.reset().observation
+            total_reward = 0.0
+            done = False
             steps = 0
-            max_steps = 1000
+            while not done and steps < max_steps_per_episode:
+                # This is a simplified evaluation loop. A real one would be in the service.
+                # Here, we just get an action and step the environment.
+                # The service would need a `predict_action` method.
+                # For now, we'll assume a placeholder logic.
 
-            while not env_state.done and steps < max_steps:
-                if self.stag_service:
-                    action_idx = self._get_stag_action(state, env)
+                # Placeholder: This logic should be moved into a service.predict_action() method
+                sdr = service.control_learner.visual_cortex.to_sdr(state, steps)
+                winners = service.sdr_index.search(sdr, 1, service.graph, service.sdr_helper)
+                if not winners:
+                    action_name = random.choice(env.action_space)
                 else:
-                    action_idx = self.control_learner.choose_action(state, training=False)
+                    state_node_id = winners[0][0]
+                    action_name = service.control_learner.motor_cortex.select_action(state_node_id, service.graph,
+                                                                                     service.action_q_table)
 
-                action = env.action_space[action_idx]
-                env_state = env.step(action)
-                state = env_state.observation
-                total_reward += env_state.reward
+                env_state = env.step(action_name)
+                state, reward, done = env_state.observation, env_state.reward, env_state.done
+                total_reward += reward
                 steps += 1
 
-            rewards.append(total_reward)
-            successes.append(total_reward > 0)
+            all_rewards.append(total_reward)
+            if total_reward > 0:  # Simple success metric
+                success_count += 1
 
-        # Restore original epsilon
-        if self.control_learner:
-            self.control_learner.epsilon = original_epsilon
+        service.is_training = True  # Reset service state
 
-        results = {
-            'avg_reward': np.mean(rewards),
-            'success_rate': np.mean(successes),
-            'rewards': rewards,
-            'successes': successes
-        }
+        avg_reward = sum(all_rewards) / len(all_rewards) if all_rewards else 0
+        success_rate = success_count / episodes if episodes > 0 else 0
 
-        print(f"Evaluation complete: Avg Reward: {results['avg_reward']:.2f}, "
-              f"Success Rate: {results['success_rate']:.2f}")
-
-        return results
-
-    def run_curriculum(self):
-        """Run curriculum learning across multiple environments"""
-        curriculum = [
-            ('gridworld', 30),
-            ('maze', 50),
-            ('snake', 75)
-        ]
-
-        print("Starting curriculum training...")
-        for env_name, episodes in curriculum:
-            print(f"\n--- Training on {env_name} for {episodes} episodes ---")
-            self.train_multiple_episodes(episodes, env_name)
-
-            # Evaluate after each stage
-            results = self.evaluate_performance(10, env_name)
-            print(f"Curriculum stage complete - {env_name}: {results['success_rate']:.2f} success rate")
-
-        print("\nCurriculum training completed!")
-
-    def _get_stag_action(self, state: np.ndarray, env: BaseEnvironment) -> int:
-        """Get action from STAG network"""
-        try:
-            # Convert state to text representation for STAG
-            state_text = f"game_state_{hash(str(state)) % 10000}"
-
-            # Use STAG for prediction
-            prediction = self.stag_service.predict_next_concept(state_text)
-
-            # Convert prediction to action (simple mapping)
-            action_hash = hash(str(prediction)) % env.get_action_size()
-            return action_hash
-
-        except Exception as e:
-            print(f"STAG action selection failed: {e}")
-            # Fallback to random action
-            return random.randint(0, env.get_action_size() - 1)
-
-    def _update_stag_network(self, state: np.ndarray, action: int, reward: float,
-                             next_state: np.ndarray, done: bool):
-        """Update STAG network with game experience"""
-        try:
-            # Convert experience to text for STAG learning
-            experience_text = f"state_{hash(str(state)) % 1000}_action_{action}_reward_{reward:.1f}"
-
-            # Learn from experience
-            self.stag_service.learn_from_text(experience_text)
-
-        except Exception as e:
-            print(f"STAG network update failed: {e}")
-
-    def get_training_statistics(self) -> Dict:
-        """Get current training statistics"""
-        if not self.training_stats['episode_rewards']:
-            return {
-                'episodes_completed': 0,
-                'avg_reward': 0,
-                'success_rate': 0,
-                'total_reward': 0
-            }
-
+        print(f"Evaluation complete. Avg Reward: {avg_reward:.2f}, Success Rate: {success_rate:.2%}")
         return {
-            'episodes_completed': self.training_stats['episodes_completed'],
-            'avg_reward': np.mean(self.training_stats['episode_rewards']),
-            'success_rate': np.mean(self.training_stats['episode_successes']),
-            'total_reward': self.training_stats['total_reward'],
-            'recent_rewards': self.training_stats['episode_rewards'][-10:],
-            'recent_successes': self.training_stats['episode_successes'][-10:]
+            "avg_reward": avg_reward,
+            "success_rate": success_rate,
+            "all_rewards": all_rewards
         }
 
 
-# Command-line interface
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description='STAG Game Trainer')
-    parser.add_argument('--network-id', type=int, required=True, help='Brain network ID')
-    parser.add_argument('--environment', type=str, default='maze',
-                        choices=['gridworld', 'maze', 'snake'], help='Game environment')
-    parser.add_argument('--episodes', type=int, default=100, help='Number of training episodes')
-    parser.add_argument('--evaluate', type=int, default=0, help='Number of evaluation episodes')
-    parser.add_argument('--curriculum', action='store_true', help='Run curriculum training')
-    parser.add_argument('--interactive', action='store_true', help='Interactive mode')
+def main():
+    """
+    Main function to run the GameTrainer from the command line.
+    """
+    parser = argparse.ArgumentParser(description="STAG Game Trainer CLI")
+    parser.add_argument('--network-id', type=int, required=True, help='The ID of the BrainNetwork to train.')
+    parser.add_argument('--action', type=str, default='train', choices=['train', 'evaluate'],
+                        help='The action to perform.')
+    parser.add_argument('--env', type=str, default='gridworld',
+                        help='The environment to use for training or evaluation.')
+    parser.add_argument('--episodes', type=int, default=100, help='Number of episodes to run.')
+    parser.add_argument('--steps', type=int, default=200, help='Maximum steps per episode.')
 
     args = parser.parse_args()
 
-    trainer = GameTrainer(args.network_id)
+    try:
+        trainer = GameTrainer(network_id=args.network_id)
 
-    if args.interactive:
-        print("Interactive STAG Game Trainer")
-        print("Commands: train <env> <episodes>, eval <env> <episodes>, curriculum, stats, quit")
+        if args.action == 'train':
+            session = trainer.train(
+                environment_name=args.env,
+                episodes=args.episodes,
+                max_steps_per_episode=args.steps
+            )
+            print("\n--- Training Session Summary ---")
+            print(f"  Session ID: {session.id}")
+            print(f"  Status: {session.status}")
+            if session.status == TrainingSession.Status.COMPLETED:
+                rewards = [e.get('reward', 0) for e in session.results.get('episodes', [])]
+                avg_reward = sum(rewards) / len(rewards) if rewards else 0
+                print(f"  Average Reward: {avg_reward:.2f}")
+            else:
+                print(f"  Error: {session.results.get('error', 'Unknown error')}")
 
-        while True:
-            try:
-                command = input("STAG> ").strip().split()
-                if not command:
-                    continue
+        elif args.action == 'evaluate':
+            results = trainer.evaluate(
+                environment_name=args.env,
+                episodes=args.episodes,
+                max_steps_per_episode=args.steps
+            )
+            print("\n--- Evaluation Summary ---")
+            print(f"  Average Reward: {results['avg_reward']:.2f}")
+            print(f"  Success Rate: {results['success_rate']:.2%}")
 
-                if command[0] == 'quit':
-                    break
-                elif command[0] == 'train' and len(command) >= 3:
-                    env_name, episodes = command[1], int(command[2])
-                    trainer.train_multiple_episodes(episodes, env_name)
-                elif command[0] == 'eval' and len(command) >= 3:
-                    env_name, episodes = command[1], int(command[2])
-                    results = trainer.evaluate_performance(episodes, env_name)
-                    print(f"Results: {results}")
-                elif command[0] == 'curriculum':
-                    trainer.run_curriculum()
-                elif command[0] == 'stats':
-                    stats = trainer.get_training_statistics()
-                    print(f"Training Statistics: {stats}")
-                else:
-                    print("Unknown command")
+    except BrainNetwork.DoesNotExist:
+        print(f"Error: No BrainNetwork found with ID {args.network_id}.")
+        sys.exit(1)
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+        sys.exit(1)
 
-            except KeyboardInterrupt:
-                break
-            except Exception as e:
-                print(f"Error: {e}")
 
-    elif args.curriculum:
-        trainer.run_curriculum()
-    else:
-        trainer.train_multiple_episodes(args.episodes, args.environment)
-
-        if args.evaluate > 0:
-            results = trainer.evaluate_performance(args.evaluate, args.environment)
-            print(f"Final evaluation results: {results}")
+if __name__ == '__main__':
+    # This block allows the script to be run from the command line.
+    # You can run this via `python -m brain.game_trainer --network-id 1`
+    # or by making the file executable (`chmod +x game_trainer.py`) and running `./game_trainer.py --network-id 1`
+    main()

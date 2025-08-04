@@ -2,10 +2,10 @@
 from django.contrib import admin
 
 # pylint: disable=no-name-in-module
-from brain.models import (GraphSnapshot, BrainNetwork)
+from brain.models import (BrainNetwork, GraphSnapshot, SnapshotNeuron, SnapshotEdge, TrainingSession)
 
 
-@admin.register(GraphSnapshot, BrainNetwork)
+@admin.register(BrainNetwork, GraphSnapshot, SnapshotNeuron, SnapshotEdge, TrainingSession)
 class UniversalAdmin(admin.ModelAdmin):
     """Universal admin for all models."""
     def get_list_display(self, request):

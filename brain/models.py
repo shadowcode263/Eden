@@ -1,75 +1,104 @@
 from django.db import models
-from django.core.exceptions import ValidationError
+from django.contrib.auth.models import User
+from django.utils import timezone
 
 class BrainNetwork(models.Model):
-    """
-    Represents a single STAG network instance and its hyperparameters.
-    """
-    name = models.CharField(max_length=255, unique=True)
-
-    # --- STAG Hyperparameters ---
-    sdr_dimensionality = models.PositiveIntegerField(default=2048, help_text="Total number of bits in an SDR.")
-    sdr_sparsity = models.PositiveIntegerField(default=40, help_text="Number of active bits in an SDR (approx 2%).")
-
-    # GNG Learning rates and decay
-    winner_learning_rate = models.FloatField(default=0.1, help_text="Learning rate (eta_1) for the winning node.")
-    neighbor_learning_rate = models.FloatField(default=0.01,
-                                               help_text="Learning rate (eta_2) for the winner's neighbors.")
-    error_decay_rate = models.FloatField(default=0.9995, help_text="Decay factor for all nodes' errors per iteration.")
-
-    # GNG Structural plasticity params
-    max_edge_age = models.PositiveIntegerField(default=50, help_text="Max age for a topological edge before it's pruned.")
-    n_iter_before_neuron_added = models.PositiveIntegerField(default=100,
-                                                             help_text="Number of iterations before growing a new node.")
-    max_nodes = models.PositiveIntegerField(default=5000, help_text="The maximum number of nodes the network can grow to.")
-
-    # HTM Temporal Sequence Hyperparameters
-    cells_per_column = models.PositiveIntegerField(default=32, help_text="Number of cells within each node (mini-column).")
-    initial_permanence = models.FloatField(default=0.21, help_text="Initial permanence for new synapses.")
-    connected_permanence = models.FloatField(default=0.50, help_text="Permanence value above which a synapse is considered connected.")
-    permanence_increment = models.FloatField(default=0.10, help_text="Amount to increase permanence for active synapses.")
-    permanence_decrement = models.FloatField(default=0.02, help_text="Amount to decrease permanence for inactive synapses.")
-    activation_threshold = models.PositiveIntegerField(default=10, help_text="Number of connected synapses required to activate a dendrite segment.")
-
-    # --- Reinforcement Learning Hyperparameters ---
-    rl_learning_rate = models.FloatField(default=0.1, help_text="Q-learning learning rate (alpha).")
-    rl_discount_factor = models.FloatField(default=0.9, help_text="RL discount factor (gamma) for future rewards.")
-    rl_exploration_rate = models.FloatField(default=0.3, help_text="RL exploration rate (epsilon) for choosing random actions.")
-
-    is_active = models.BooleanField(default=False, help_text="Designates this as the currently active network. Only one can be active.")
+    name = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    owner = models.ForeignKey(User, on_delete=models.CASCADE, null=True, blank=True)
+    is_active = models.BooleanField(default=False, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    last_accessed = models.DateTimeField(default=timezone.now)
 
-    class Meta:
-        verbose_name = "Brain Network"
-        verbose_name_plural = "Brain Networks"
+    # STAG Parameters
+    sdr_dimensionality = models.IntegerField(default=2048)
+    sdr_sparsity = models.IntegerField(default=40)
+
+    # GNG Parameters
+    max_nodes = models.IntegerField(default=5000)
+    n_iter_before_neuron_added = models.IntegerField(default=50) # Reduced for faster growth
+    max_edge_age = models.IntegerField(default=50)
+    winner_learning_rate = models.FloatField(default=0.08)
+    neighbor_learning_rate = models.FloatField(default=0.005)
+    error_decay_rate = models.FloatField(default=0.9995)
+
+    # HTM Parameters
+    cells_per_column = models.IntegerField(default=16)
+    activation_threshold = models.IntegerField(default=13)
+    initial_permanence = models.FloatField(default=0.21)
+    connected_permanence = models.FloatField(default=0.5)
+    permanence_increment = models.FloatField(default=0.1)
+    permanence_decrement = models.FloatField(default=0.05)
+
+    # RL Parameters
+    rl_learning_rate = models.FloatField(default=0.05)
+    rl_discount_factor = models.FloatField(default=0.95)
+    rl_exploration_rate = models.FloatField(default=1.0)
 
     def __str__(self):
-        return self.name
-
-    def save(self, *args, **kwargs):
-        """
-        Ensures that only one network can be active at a time.
-        """
-        if self.is_active:
-            BrainNetwork.objects.filter(is_active=True).exclude(pk=self.pk).update(is_active=False)
-        super().save(*args, **kwargs)
-
-class GraphSnapshot(models.Model):
-    """
-    Represents a saved state (snapshot) of a STAG network at a point in time.
-    This allows for versioning and restoring the graph's "weights".
-    """
-    network = models.ForeignKey(BrainNetwork, related_name='snapshots', on_delete=models.CASCADE)
-    name = models.CharField(max_length=255, help_text="A descriptive name for the snapshot.")
-    graph_data = models.JSONField(help_text="The entire graph state (nodes and links) serialized as JSON.")
-    created_at = models.DateTimeField(auto_now_add=True)
+        return f"{self.name} (ID: {self.id})"
 
     class Meta:
         ordering = ['-created_at']
-        verbose_name = "Graph Snapshot"
-        verbose_name_plural = "Graph Snapshots"
+        verbose_name = "STAG Brain Network"
+
+
+class GraphSnapshot(models.Model):
+    network = models.ForeignKey(BrainNetwork, related_name='snapshots', on_delete=models.CASCADE)
+    name = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+    notes = models.TextField(blank=True, help_text="e.g., 'After training on Maze env for 100 episodes'")
+
+    class Meta:
         unique_together = ('network', 'name')
+        ordering = ['-created_at']
 
     def __str__(self):
-        return f"Snapshot '{self.name}' for {self.network.name} @ {self.created_at.strftime('%Y-%m-%d %H:%M')}"
+        return f"Snapshot '{self.name}' for {self.network.name}"
+
+
+class SnapshotNeuron(models.Model):
+    snapshot = models.ForeignKey(GraphSnapshot, related_name='neurons', on_delete=models.CASCADE)
+    neuron_id = models.IntegerField()
+    prototype_sdr = models.JSONField()
+    error = models.FloatField(default=0.0)
+    cells = models.JSONField()
+    last_active_iter = models.IntegerField(default=0)
+    node_type = models.CharField(max_length=50, default='sensory')
+    action_name = models.CharField(max_length=255, null=True, blank=True)
+
+    class Meta:
+        indexes = [models.Index(fields=['snapshot', 'neuron_id'])]
+
+
+class SnapshotEdge(models.Model):
+    snapshot = models.ForeignKey(GraphSnapshot, related_name='edges', on_delete=models.CASCADE)
+    source_id = models.IntegerField()
+    target_id = models.IntegerField()
+    age = models.IntegerField(default=0)
+
+    class Meta:
+        indexes = [models.Index(fields=['snapshot'])]
+
+
+class TrainingSession(models.Model):
+    """Records a single training run for a network."""
+    class Status(models.TextChoices):
+        RUNNING = 'RUNNING', 'Running'
+        COMPLETED = 'COMPLETED', 'Completed'
+        FAILED = 'FAILED', 'Failed'
+
+    network = models.ForeignKey(BrainNetwork, related_name='training_sessions', on_delete=models.CASCADE)
+    environment_name = models.CharField(max_length=100)
+    start_time = models.DateTimeField(auto_now_add=True)
+    end_time = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.RUNNING)
+    parameters = models.JSONField(help_text="Parameters like episodes, max_steps, etc.")
+    results = models.JSONField(null=True, blank=True, help_text="Final results, e.g., rewards per episode")
+
+    class Meta:
+        ordering = ['-start_time']
+
+    def __str__(self):
+        return f"Training on {self.environment_name} for {self.network.name} at {self.start_time}"

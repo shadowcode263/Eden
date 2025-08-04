@@ -2,45 +2,53 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
     BrainNetworkViewSet,
-    LearnTextView,
-    LearnBookView,  # Import the new view
-    PredictStoryContinuationView,
-    GraphStateView,
     SnapshotViewSet,
-    AdminActionsView,
-    GameTrainingView,  # Import the new view
-    list_networks,  # Add the new view function
-    create_network,  # Add the new view function
-    network_action,  # Add the new view function
+    TrainingSessionViewSet,
+    StartTrainingView,
+    GetEnvironmentsView,
 )
 
 app_name = 'brain'
 
-# The router generates standard URLs for the ViewSets.
-# The frontend will call '/api/brain/networks/' and '/api/brain/snapshots/'.
+# --- Top-Level Router ---
+# This handles the primary /networks/ endpoint.
 router = DefaultRouter()
-router.register(r'networks', BrainNetworkViewSet, basename='brain-network')
-router.register(r'snapshots', SnapshotViewSet, basename='graph-snapshot')
+router.register(r'networks', BrainNetworkViewSet, basename='network')
 
+# --- Manually Defined URL Patterns for Nested Resources ---
+# We define these paths explicitly to avoid the rest_framework_nested dependency.
+# This structure ensures the views still receive the 'network_pk' kwarg.
 urlpatterns = [
-    # Router-generated URLs are included first.
+    # Include the router-generated URLs for /networks/ and /networks/{pk}/
     path('', include(router.urls)),
 
-    # Custom network URLs
-    path('networks/', list_networks, name='list_networks'),
-    path('networks/create/', create_network, name='create_network'),
-    path('networks/<int:network_id>/actions/', network_action, name='network_action'),
-    path('networks/<int:network_id>/set-active/', network_action, name='set_active_network'),  # Add this line
+    # --- Snapshots (nested under a specific network) ---
+    path('networks/<int:network_pk>/snapshots/',
+         SnapshotViewSet.as_view({'get': 'list'}),
+         name='network-snapshot-list'),
 
-    # Core learning and inference endpoints.
-    path('actions/learn/', LearnTextView.as_view(), name='learn-text'),
-    path('actions/learn-book/', LearnBookView.as_view(), name='learn-book'),  # Add the new URL
-    path('actions/predict/', PredictStoryContinuationView.as_view(), name='predict-story'),
-    path('actions/game-training/', GameTrainingView.as_view(), name='game-training'),  # Use the class-based view
+    path('networks/<int:network_pk>/snapshots/<int:pk>/',
+         SnapshotViewSet.as_view({'get': 'retrieve'}),
+         name='network-snapshot-detail'),
 
-    # Visualization endpoint.
-    path('state/', GraphStateView.as_view(), name='graph-state'),
+    path('networks/<int:network_pk>/snapshots/<int:pk>/load/',
+         SnapshotViewSet.as_view({'post': 'load'}),
+         name='network-snapshot-load'),
 
-    # Admin utility endpoint.
-    path('admin/actions/', AdminActionsView.as_view(), name='admin-actions'),
+    # --- Training Sessions (nested under a specific network) ---
+    path('networks/<int:network_pk>/training-sessions/',
+         TrainingSessionViewSet.as_view({'get': 'list'}),
+         name='network-training-session-list'),
+
+    path('networks/<int:network_pk>/training-sessions/<int:pk>/',
+         TrainingSessionViewSet.as_view({'get': 'retrieve'}),
+         name='network-training-session-detail'),
+
+    # --- Custom Action-Oriented Endpoints ---
+
+    # Endpoint to start a training session for a specific network
+    path('networks/<int:pk>/train/', StartTrainingView.as_view(), name='network-train'),
+
+    # Standalone endpoint to get available environments
+    path('environments/', GetEnvironmentsView.as_view(), name='get-environments'),
 ]

@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -8,8 +8,23 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
-import { Gamepad2, Play, Square, BarChart3, Trophy, Target, Zap } from "lucide-react"
+import { ScrollArea } from "@/components/ui/scroll-area"
+import {
+  Gamepad2,
+  Play,
+  Square,
+  BarChart3,
+  Trophy,
+  Target,
+  Zap,
+  Eye,
+  Activity,
+  Loader2,
+  Wifi,
+  WifiOff,
+} from "lucide-react"
 import { toast } from "@/hooks/use-toast"
+import { useWebSocket } from "@/hooks/use-websocket"
 
 interface GameTrainingPanelProps {
   networkId: number
@@ -29,16 +44,56 @@ interface EnvironmentInfo {
   recommended_episodes: number
 }
 
+interface GameEvent {
+  event_type: string
+  data: {
+    action?: string
+    reward?: number
+    shaped_reward?: number
+    total_reward?: number
+    step?: number
+    episode?: number
+    observation?: number[][]
+    done?: boolean
+  }
+}
+
+interface TrainingProgress {
+  episode: number
+  reward: number
+  steps: number
+  success: boolean
+  epsilon?: number
+}
+
 export function GameTrainingPanel({ networkId }: GameTrainingPanelProps) {
   const [selectedEnvironment, setSelectedEnvironment] = useState<string>("")
   const [episodes, setEpisodes] = useState<number>(50)
   const [isTraining, setIsTraining] = useState(false)
   const [isEvaluating, setIsEvaluating] = useState(false)
+  const [isConnecting, setIsConnecting] = useState(false)
   const [trainingProgress, setTrainingProgress] = useState(0)
+  const [currentEpisode, setCurrentEpisode] = useState(0)
   const [evaluationResults, setEvaluationResults] = useState<TrainingResults | null>(null)
   const [availableEnvironments, setAvailableEnvironments] = useState<EnvironmentInfo[]>([])
 
-  // Environment configurations matching environments.py
+  // Game visualization state
+  const [gameState, setGameState] = useState<number[][] | null>(null)
+  const [currentAction, setCurrentAction] = useState<string>("")
+  const [currentReward, setCurrentReward] = useState<number>(0)
+  const [totalReward, setTotalReward] = useState<number>(0)
+  const [currentStep, setCurrentStep] = useState<number>(0)
+  const [gameEvents, setGameEvents] = useState<GameEvent[]>([])
+  const [recentStats, setRecentStats] = useState<TrainingProgress[]>([])
+
+  const gameEventsRef = useRef<HTMLDivElement>(null)
+
+  // WebSocket connection for real-time updates
+  const { isConnected, sendMessage, lastMessage } = useWebSocket(networkId, {
+    enabled: networkId !== null,
+  })
+
+  // Environment configurations
   const environmentConfigs: EnvironmentInfo[] = [
     {
       name: "gridworld",
@@ -62,42 +117,127 @@ export function GameTrainingPanel({ networkId }: GameTrainingPanelProps) {
 
   // Load available environments on component mount
   useEffect(() => {
-    loadEnvironments()
-  }, [])
-
-  const loadEnvironments = async () => {
-    try {
-      const response = await fetch("http://localhost:8000/api/brain/actions/game-training/", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "get_environments" }),
-      })
-
-      if (response.ok) {
-        const data = await response.json()
-        // Use the environment configs with API data if available
-        const envs = environmentConfigs.map((config) => ({
-          ...config,
-          description: data.descriptions?.[config.name] || config.description,
-        }))
-        setAvailableEnvironments(envs)
-        if (envs.length > 0) {
-          setSelectedEnvironment(envs[0].name)
-          setEpisodes(envs[0].recommended_episodes)
-        }
-      } else {
-        // Fallback to local configurations
-        setAvailableEnvironments(environmentConfigs)
-        setSelectedEnvironment(environmentConfigs[0].name)
-        setEpisodes(environmentConfigs[0].recommended_episodes)
-      }
-    } catch (error) {
-      console.error("Failed to load environments:", error)
-      // Fallback to local configurations
-      setAvailableEnvironments(environmentConfigs)
+    setAvailableEnvironments(environmentConfigs)
+    if (environmentConfigs.length > 0) {
       setSelectedEnvironment(environmentConfigs[0].name)
       setEpisodes(environmentConfigs[0].recommended_episodes)
     }
+  }, [])
+
+  // Handle WebSocket messages
+  useEffect(() => {
+    if (!lastMessage) return
+
+    console.log("Game training received message:", lastMessage)
+
+    switch (lastMessage.type) {
+      case "training_started":
+        setIsTraining(true)
+        setTrainingProgress(0)
+        setCurrentEpisode(0)
+        setGameEvents([])
+        setRecentStats([])
+        toast({
+          title: "Training Started",
+          description: `Started training on ${lastMessage.environment} for ${lastMessage.episodes} episodes.`,
+        })
+        break
+
+      case "training_progress":
+        const stats = lastMessage.stats as TrainingProgress
+        setCurrentEpisode(stats.episode || 0)
+        setTrainingProgress(((stats.episode || 0) / episodes) * 100)
+        setRecentStats((prev) => [...prev.slice(-9), stats])
+        break
+
+      case "training_completed":
+        setIsTraining(false)
+        setTrainingProgress(100)
+        toast({
+          title: "Training Complete",
+          description: `Finished training on ${lastMessage.environment}.`,
+        })
+        break
+
+      case "training_stopped":
+        setIsTraining(false)
+        toast({
+          title: "Training Stopped",
+          description: "Training has been stopped.",
+        })
+        break
+
+      case "training_error":
+        setIsTraining(false)
+        toast({
+          title: "Training Error",
+          description: lastMessage.message,
+          variant: "destructive",
+        })
+        break
+
+      case "evaluation_completed":
+        setIsEvaluating(false)
+        setEvaluationResults(lastMessage.results)
+        toast({
+          title: "Evaluation Complete",
+          description: `Evaluated performance on ${lastMessage.environment}.`,
+        })
+        break
+
+      case "game_event":
+        const gameEvent = lastMessage.payload as GameEvent
+        handleGameEvent(gameEvent)
+        break
+
+      case "curriculum_started":
+        setIsTraining(true)
+        toast({
+          title: "Curriculum Started",
+          description: "Started curriculum training across all environments.",
+        })
+        break
+
+      case "curriculum_completed":
+        setIsTraining(false)
+        toast({
+          title: "Curriculum Complete",
+          description: "Curriculum training completed successfully.",
+        })
+        break
+    }
+  }, [lastMessage, episodes])
+
+  const handleGameEvent = (event: GameEvent) => {
+    const { event_type, data } = event
+
+    switch (event_type) {
+      case "action":
+        setCurrentAction(data.action || "")
+        setCurrentStep(data.step || 0)
+        break
+
+      case "reward":
+        setCurrentReward(data.reward || 0)
+        setTotalReward(data.total_reward || 0)
+        break
+
+      case "observation":
+        if (data.observation) {
+          setGameState(data.observation)
+        }
+        break
+    }
+
+    // Add to events log
+    setGameEvents((prev) => [...prev.slice(-49), event])
+
+    // Auto-scroll events
+    setTimeout(() => {
+      if (gameEventsRef.current) {
+        gameEventsRef.current.scrollTop = gameEventsRef.current.scrollHeight
+      }
+    }, 100)
   }
 
   const startTraining = async () => {
@@ -110,60 +250,37 @@ export function GameTrainingPanel({ networkId }: GameTrainingPanelProps) {
       return
     }
 
-    setIsTraining(true)
-    setTrainingProgress(0)
-    setEvaluationResults(null)
-
-    try {
-      const response = await fetch("http://localhost:8000/api/brain/actions/game-training/", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "start_training",
-          environment: selectedEnvironment,
-          episodes: episodes,
-          network_id: networkId,
-        }),
-      })
-
-      const result = await response.json()
-
-      if (response.ok) {
-        toast({
-          title: "Training Started",
-          description: `Started training on ${selectedEnvironment} for ${episodes} episodes.`,
-        })
-
-        // Simulate progress (in real implementation, you'd get this from WebSocket)
-        simulateTrainingProgress()
-      } else {
-        throw new Error(result.error || "Training failed to start")
-      }
-    } catch (error) {
+    if (!isConnected) {
       toast({
-        title: "Training Error",
-        description: error instanceof Error ? error.message : "An unknown error occurred.",
+        title: "Connection Error",
+        description: "WebSocket not connected. Please check your connection.",
         variant: "destructive",
       })
-      setIsTraining(false)
+      return
     }
+
+    // Reset state
+    setGameState(null)
+    setCurrentAction("")
+    setCurrentReward(0)
+    setTotalReward(0)
+    setCurrentStep(0)
+    setGameEvents([])
+    setRecentStats([])
+
+    // Send training command via WebSocket
+    sendMessage({
+      type: "start_training",
+      environment: selectedEnvironment,
+      episodes: episodes,
+      training_type: "game",
+    })
   }
 
-  const simulateTrainingProgress = () => {
-    let progress = 0
-    const interval = setInterval(() => {
-      progress += Math.random() * 5
-      if (progress >= 100) {
-        progress = 100
-        clearInterval(interval)
-        setIsTraining(false)
-        toast({
-          title: "Training Complete",
-          description: `Finished training on ${selectedEnvironment}.`,
-        })
-      }
-      setTrainingProgress(progress)
-    }, 500)
+  const stopTraining = () => {
+    if (isConnected) {
+      sendMessage({ type: "stop_training" })
+    }
   }
 
   const evaluatePerformance = async () => {
@@ -176,99 +293,34 @@ export function GameTrainingPanel({ networkId }: GameTrainingPanelProps) {
       return
     }
 
-    setIsEvaluating(true)
-    setEvaluationResults(null)
-
-    try {
-      const response = await fetch("http://localhost:8000/api/brain/actions/game-training/", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "evaluate",
-          environment: selectedEnvironment,
-          episodes: 10,
-          network_id: networkId,
-        }),
-      })
-
-      const result = await response.json()
-
-      if (response.ok) {
-        setEvaluationResults(
-          result.results || {
-            avg_reward: Math.random() * 100,
-            success_rate: Math.random(),
-            rewards: Array.from({ length: 10 }, () => Math.random() * 100),
-            successes: Array.from({ length: 10 }, () => Math.random() > 0.5),
-          },
-        )
-        toast({
-          title: "Evaluation Complete",
-          description: `Evaluated performance on ${selectedEnvironment}.`,
-        })
-      } else {
-        throw new Error(result.error || "Evaluation failed")
-      }
-    } catch (error) {
+    if (!isConnected) {
       toast({
-        title: "Evaluation Error",
-        description: error instanceof Error ? error.message : "An unknown error occurred.",
+        title: "Connection Error",
+        description: "WebSocket not connected. Please check your connection.",
         variant: "destructive",
       })
-      // Set mock results on error for demo purposes
-      setEvaluationResults({
-        avg_reward: Math.random() * 100,
-        success_rate: Math.random(),
-        rewards: Array.from({ length: 10 }, () => Math.random() * 100),
-        successes: Array.from({ length: 10 }, () => Math.random() > 0.5),
-      })
-    } finally {
-      setIsEvaluating(false)
+      return
     }
+
+    setIsEvaluating(true)
+    sendMessage({
+      type: "evaluate_performance",
+      environment: selectedEnvironment,
+      episodes: 10,
+    })
   }
 
   const runCurriculum = async () => {
-    setIsTraining(true)
-    setTrainingProgress(0)
-
-    try {
-      const response = await fetch("http://localhost:8000/api/brain/actions/game-training/", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "run_curriculum",
-          network_id: networkId,
-        }),
-      })
-
-      const result = await response.json()
-
-      if (response.ok) {
-        toast({
-          title: "Curriculum Started",
-          description: "Started curriculum training across all environments.",
-        })
-        simulateTrainingProgress()
-      } else {
-        throw new Error(result.error || "Curriculum failed to start")
-      }
-    } catch (error) {
+    if (!isConnected) {
       toast({
-        title: "Curriculum Error",
-        description: error instanceof Error ? error.message : "An unknown error occurred.",
+        title: "Connection Error",
+        description: "WebSocket not connected. Please check your connection.",
         variant: "destructive",
       })
-      setIsTraining(false)
+      return
     }
-  }
 
-  const stopTraining = () => {
-    setIsTraining(false)
-    setTrainingProgress(0)
-    toast({
-      title: "Training Stopped",
-      description: "Training has been manually stopped.",
-    })
+    sendMessage({ type: "run_curriculum" })
   }
 
   const handleEnvironmentChange = (envName: string) => {
@@ -292,14 +344,72 @@ export function GameTrainingPanel({ networkId }: GameTrainingPanelProps) {
     }
   }
 
+  const renderGameState = () => {
+    if (!gameState) return null
+
+    return (
+      <div className="grid gap-1 p-2 bg-slate-900 rounded font-mono text-xs">
+        {gameState.map((row, i) => (
+          <div key={i} className="flex gap-1">
+            {row.map((cell, j) => {
+              let cellClass = "w-4 h-4 flex items-center justify-center rounded-sm text-xs font-bold"
+              let content = ""
+
+              if (cell === 0.5) {
+                // Player
+                cellClass += " bg-blue-500 text-white"
+                content = "P"
+              } else if (cell === 1) {
+                // Goal/Food
+                cellClass += " bg-green-500 text-white"
+                content = "G"
+              } else if (cell === -1) {
+                // Obstacle/Wall
+                cellClass += " bg-red-500 text-white"
+                content = "█"
+              } else if (cell === -0.5) {
+                // Special (like maze exit)
+                cellClass += " bg-yellow-500 text-black"
+                content = "E"
+              } else {
+                // Empty
+                cellClass += " bg-slate-700"
+                content = "·"
+              }
+
+              return (
+                <div key={j} className={cellClass}>
+                  {content}
+                </div>
+              )
+            })}
+          </div>
+        ))}
+      </div>
+    )
+  }
+
   return (
-    <div className="space-y-6">
-      {/* Main Game Environment Training Card - Now contains everything */}
-      <Card className="shadow-lg">
+    <div className="h-full flex flex-col space-y-4">
+      {/* Main Training Controls */}
+      <Card className="shadow-lg flex-shrink-0">
         <CardHeader>
-          <CardTitle className="flex items-center">
-            <Gamepad2 className="w-5 h-5 mr-2 text-blue-600" />
-            Game Environment Training
+          <CardTitle className="flex items-center justify-between">
+            <div className="flex items-center">
+              <Gamepad2 className="w-5 h-5 mr-2 text-blue-600" />
+              Game Environment Training
+            </div>
+            {isConnected ? (
+              <Badge variant="secondary" className="bg-green-100 text-green-800">
+                <Wifi className="w-3 h-3 mr-1" />
+                Connected
+              </Badge>
+            ) : (
+              <Badge variant="secondary" className="bg-red-100 text-red-800">
+                <WifiOff className="w-3 h-3 mr-1" />
+                Disconnected
+              </Badge>
+            )}
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-6">
@@ -307,7 +417,7 @@ export function GameTrainingPanel({ networkId }: GameTrainingPanelProps) {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <Label htmlFor="environment">Game Environment</Label>
-              <Select value={selectedEnvironment} onValueChange={handleEnvironmentChange}>
+              <Select value={selectedEnvironment} onValueChange={handleEnvironmentChange} disabled={isTraining}>
                 <SelectTrigger>
                   <SelectValue placeholder="Select environment" />
                 </SelectTrigger>
@@ -339,18 +449,10 @@ export function GameTrainingPanel({ networkId }: GameTrainingPanelProps) {
                 min={10}
                 max={500}
                 step={10}
+                disabled={isTraining}
               />
             </div>
           </div>
-
-          {selectedEnvironment && (
-            <div className="p-3 bg-blue-50 rounded-md border border-blue-200">
-              <p className="text-sm text-blue-800">
-                <strong>Selected:</strong>{" "}
-                {availableEnvironments.find((env) => env.name === selectedEnvironment)?.description}
-              </p>
-            </div>
-          )}
 
           {/* Training Controls */}
           <div className="space-y-4">
@@ -362,12 +464,12 @@ export function GameTrainingPanel({ networkId }: GameTrainingPanelProps) {
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <Button
                 onClick={startTraining}
-                disabled={isTraining || !selectedEnvironment}
-                className="bg-green-600 hover:bg-green-700"
+                disabled={isTraining || !selectedEnvironment || !isConnected}
+                className="bg-green-600 hover:bg-green-700 disabled:opacity-50"
               >
                 {isTraining ? (
                   <>
-                    <Square className="w-4 h-4 mr-2" />
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
                     Training...
                   </>
                 ) : (
@@ -378,10 +480,14 @@ export function GameTrainingPanel({ networkId }: GameTrainingPanelProps) {
                 )}
               </Button>
 
-              <Button onClick={evaluatePerformance} disabled={isEvaluating || !selectedEnvironment} variant="outline">
+              <Button
+                onClick={evaluatePerformance}
+                disabled={isEvaluating || !selectedEnvironment || !isConnected}
+                variant="outline"
+              >
                 {isEvaluating ? (
                   <>
-                    <BarChart3 className="w-4 h-4 mr-2 animate-pulse" />
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
                     Evaluating...
                   </>
                 ) : (
@@ -394,65 +500,169 @@ export function GameTrainingPanel({ networkId }: GameTrainingPanelProps) {
 
               <Button
                 onClick={runCurriculum}
-                disabled={isTraining}
+                disabled={isTraining || !isConnected}
                 variant="outline"
                 className="bg-purple-50 hover:bg-purple-100"
               >
-                <Target className="w-4 h-4 mr-2" />
-                Full Curriculum
+                {isTraining ? (
+                  <>
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    Running...
+                  </>
+                ) : (
+                  <>
+                    <Target className="w-4 h-4 mr-2" />
+                    Full Curriculum
+                  </>
+                )}
               </Button>
             </div>
 
             {isTraining && (
               <>
-                <Button onClick={stopTraining} variant="outline" className="w-full bg-red-50 hover:bg-red-100">
+                <Button
+                  onClick={stopTraining}
+                  variant="outline"
+                  className="w-full bg-red-50 hover:bg-red-100"
+                  disabled={!isConnected}
+                >
                   <Square className="w-4 h-4 mr-2" />
                   Stop Training
                 </Button>
                 <div className="space-y-2">
                   <div className="flex justify-between text-sm">
                     <span>Training Progress</span>
-                    <span>{Math.round(trainingProgress)}%</span>
+                    <span>
+                      {Math.round(trainingProgress)}% (Episode {currentEpisode}/{episodes})
+                    </span>
                   </div>
                   <Progress value={trainingProgress} className="w-full" />
                 </div>
               </>
             )}
           </div>
-
-          {/* Quick Training Presets */}
-          <div className="space-y-3 pt-4 border-t">
-            <div className="flex items-center gap-2">
-              <Target className="w-4 h-4 text-indigo-600" />
-              <span className="font-medium text-sm">Quick Training Presets</span>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              {availableEnvironments.map((env) => (
-                <Button
-                  key={env.name}
-                  variant="outline"
-                  onClick={() => handleEnvironmentChange(env.name)}
-                  className="h-auto p-3 flex flex-col items-start text-left"
-                  disabled={isTraining}
-                >
-                  <div className="flex items-center gap-2 mb-1 w-full">
-                    <div className="font-medium capitalize text-sm">{env.name}</div>
-                    <Badge variant="secondary" className={`${getDifficultyColor(env.difficulty)} text-xs`}>
-                      {env.difficulty}
-                    </Badge>
-                  </div>
-                  <div className="text-xs text-gray-500">{env.recommended_episodes} episodes</div>
-                </Button>
-              ))}
-            </div>
-          </div>
         </CardContent>
       </Card>
 
-      {/* Evaluation Results - Keep this separate as it's conditional */}
+      {/* Real-time Game Visualization - Flex grow to fill remaining space */}
+      <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* Game State Visualization */}
+        <Card className="shadow-lg h-full flex flex-col">
+          <CardHeader className="flex-shrink-0">
+            <CardTitle className="flex items-center">
+              <Eye className="w-5 h-5 mr-2 text-purple-600" />
+              Game State
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="flex-1 flex flex-col space-y-4">
+            {gameState ? (
+              <div className="flex-1 flex items-center justify-center">{renderGameState()}</div>
+            ) : (
+              <div className="flex-1 flex items-center justify-center text-center text-muted-foreground">
+                <div>
+                  <Eye className="w-12 h-12 mx-auto mb-4 opacity-50" />
+                  <p>Game visualization will appear here during training</p>
+                </div>
+              </div>
+            )}
+            {/* Current Game Stats */}
+            <div className="grid grid-cols-2 gap-4 text-sm flex-shrink-0">
+              <div className="space-y-2">
+                <div className="flex justify-between">
+                  <span>Step:</span>
+                  <Badge variant="outline">{currentStep}</Badge>
+                </div>
+                <div className="flex justify-between">
+                  <span>Action:</span>
+                  <Badge variant="secondary">{currentAction || "None"}</Badge>
+                </div>
+              </div>
+              <div className="space-y-2">
+                <div className="flex justify-between">
+                  <span>Reward:</span>
+                  <Badge variant={currentReward > 0 ? "default" : "destructive"}>{currentReward.toFixed(2)}</Badge>
+                </div>
+                <div className="flex justify-between">
+                  <span>Total:</span>
+                  <Badge variant="outline">{totalReward.toFixed(2)}</Badge>
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Events Log */}
+        <Card className="shadow-lg h-full flex flex-col">
+          <CardHeader className="flex-shrink-0">
+            <CardTitle className="flex items-center">
+              <Activity className="w-5 h-5 mr-2 text-orange-600" />
+              Game Events
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="flex-1 min-h-0">
+            <ScrollArea className="h-full">
+              <div ref={gameEventsRef} className="space-y-2">
+                {gameEvents.length > 0 ? (
+                  gameEvents.map((event, index) => (
+                    <div key={index} className="text-xs p-2 bg-slate-50 rounded border-l-2 border-blue-200">
+                      <div className="flex justify-between items-center">
+                        <span className="font-medium text-blue-600">{event.event_type}</span>
+                        <span className="text-muted-foreground">Step {event.data.step || 0}</span>
+                      </div>
+                      {event.data.action && <div className="text-slate-600">Action: {event.data.action}</div>}
+                      {event.data.reward !== undefined && (
+                        <div className={`${event.data.reward > 0 ? "text-green-600" : "text-red-600"}`}>
+                          Reward: {event.data.reward.toFixed(2)}
+                        </div>
+                      )}
+                    </div>
+                  ))
+                ) : (
+                  <div className="h-full flex items-center justify-center text-center text-muted-foreground">
+                    <div>
+                      <Activity className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                      <p>Game events will appear here during training</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </ScrollArea>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Recent Training Stats */}
+      {recentStats.length > 0 && (
+        <Card className="shadow-lg flex-shrink-0">
+          <CardHeader>
+            <CardTitle className="flex items-center">
+              <BarChart3 className="w-5 h-5 mr-2 text-indigo-600" />
+              Recent Episodes
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+              {recentStats.slice(-5).map((stat, index) => (
+                <div key={index} className="text-center p-3 bg-slate-50 rounded">
+                  <div className="text-lg font-bold text-indigo-600">#{stat.episode}</div>
+                  <div className="text-sm text-muted-foreground">Reward: {stat.reward.toFixed(1)}</div>
+                  <div className="text-xs text-muted-foreground">Steps: {stat.steps}</div>
+                  <Badge
+                    variant={stat.success ? "default" : "secondary"}
+                    className={stat.success ? "bg-green-100 text-green-800" : ""}
+                  >
+                    {stat.success ? "Success" : "Failed"}
+                  </Badge>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Evaluation Results */}
       {evaluationResults && (
-        <Card className="shadow-lg">
+        <Card className="shadow-lg flex-shrink-0">
           <CardHeader>
             <CardTitle className="flex items-center">
               <Trophy className="w-5 h-5 mr-2 text-yellow-600" />

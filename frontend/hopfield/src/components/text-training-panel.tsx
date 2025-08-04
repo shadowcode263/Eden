@@ -2,15 +2,17 @@
 
 import type React from "react"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { BookOpen, Sparkles, Loader2, Upload, FileText } from "lucide-react"
+import { Badge } from "@/components/ui/badge"
+import { BookOpen, Sparkles, Loader2, Upload, FileText, Wifi, WifiOff } from "lucide-react"
 import { toast } from "@/hooks/use-toast"
+import { useWebSocket } from "@/hooks/use-websocket"
 
 interface TextTrainingPanelProps {
   networkId: number
@@ -26,6 +28,86 @@ export function TextTrainingPanel({ networkId, onAction }: TextTrainingPanelProp
   const [isUploadingBook, setIsUploadingBook] = useState(false)
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
 
+  // WebSocket connection for real-time updates
+  const { isConnected, sendMessage, lastMessage } = useWebSocket(networkId, {
+    enabled: networkId !== null,
+  })
+
+  // Handle WebSocket messages
+  useEffect(() => {
+    if (!lastMessage) return
+
+    console.log("Text training received message:", lastMessage)
+
+    switch (lastMessage.type) {
+      case "learn_text_completed":
+        setIsLearning(false)
+        toast({
+          title: "Learning Complete",
+          description: `Successfully learned from ${learningText.length} characters of text.`,
+        })
+        setLearningText("")
+        onAction()
+        break
+
+      case "learn_text_error":
+        setIsLearning(false)
+        toast({
+          title: "Learning Failed",
+          description: lastMessage.message,
+          variant: "destructive",
+        })
+        break
+
+      case "learn_book_completed":
+        setIsUploadingBook(false)
+        toast({
+          title: "Book Learning Complete",
+          description: `Successfully learned from "${selectedFile?.name}".`,
+        })
+        setSelectedFile(null)
+        // Reset file input
+        const fileInput = document.getElementById("book-file") as HTMLInputElement
+        if (fileInput) fileInput.value = ""
+        onAction()
+        break
+
+      case "learn_book_error":
+        setIsUploadingBook(false)
+        toast({
+          title: "Book Learning Failed",
+          description: lastMessage.message,
+          variant: "destructive",
+        })
+        break
+
+      case "predict_story_completed":
+        setIsPredicting(false)
+        const continuation = lastMessage.result
+        if (Array.isArray(continuation)) {
+          setPredictionResult(continuation.join(" "))
+        } else if (typeof continuation === "string") {
+          setPredictionResult(continuation)
+        } else {
+          setPredictionResult("No prediction generated")
+        }
+        toast({
+          title: "Prediction Complete",
+          description: "Story continuation generated successfully.",
+        })
+        break
+
+      case "predict_story_error":
+        setIsPredicting(false)
+        toast({
+          title: "Prediction Failed",
+          description: lastMessage.message,
+          variant: "destructive",
+        })
+        break
+    }
+  }, [lastMessage, learningText, selectedFile, onAction])
+
   const handleLearnText = async () => {
     if (!learningText.trim()) {
       toast({
@@ -36,41 +118,20 @@ export function TextTrainingPanel({ networkId, onAction }: TextTrainingPanelProp
       return
     }
 
-    setIsLearning(true)
-    try {
-      const response = await fetch("http://localhost:8000/api/brain/actions/learn/", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          network_id: networkId,
-          text_content: learningText,
-        }),
-      })
-
-      if (response.ok) {
-        const data = await response.json()
-        toast({
-          title: "Learning Complete",
-          description: `Successfully learned from ${learningText.length} characters of text.`,
-        })
-        setLearningText("")
-        onAction()
-      } else {
-        const errorData = await response.json()
-        throw new Error(errorData.error || "Failed to learn from text")
-      }
-    } catch (error) {
-      console.error("Error learning text:", error)
+    if (!isConnected) {
       toast({
-        title: "Learning Failed",
-        description: error instanceof Error ? error.message : "Failed to learn from text.",
+        title: "Connection Error",
+        description: "WebSocket not connected. Please check your connection.",
         variant: "destructive",
       })
-    } finally {
-      setIsLearning(false)
+      return
     }
+
+    setIsLearning(true)
+    sendMessage({
+      type: "learn_text",
+      text_content: learningText,
+    })
   }
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -110,46 +171,31 @@ export function TextTrainingPanel({ networkId, onAction }: TextTrainingPanelProp
       return
     }
 
+    if (!isConnected) {
+      toast({
+        title: "Connection Error",
+        description: "WebSocket not connected. Please check your connection.",
+        variant: "destructive",
+      })
+      return
+    }
+
     setIsUploadingBook(true)
     try {
       // Read file content
       const fileContent = await selectedFile.text()
 
-      const response = await fetch("http://localhost:8000/api/brain/actions/learn-book/", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          network_id: networkId,
-          book_content: fileContent,
-        }),
+      sendMessage({
+        type: "learn_book",
+        book_content: fileContent,
       })
-
-      if (response.ok) {
-        const data = await response.json()
-        toast({
-          title: "Book Learning Complete",
-          description: `Successfully learned from "${selectedFile.name}" (${fileContent.length} characters).`,
-        })
-        setSelectedFile(null)
-        // Reset file input
-        const fileInput = document.getElementById("book-file") as HTMLInputElement
-        if (fileInput) fileInput.value = ""
-        onAction()
-      } else {
-        const errorData = await response.json()
-        throw new Error(errorData.error || errorData.detail || "Failed to learn from book")
-      }
     } catch (error) {
-      console.error("Error uploading book:", error)
+      setIsUploadingBook(false)
       toast({
-        title: "Book Learning Failed",
-        description: error instanceof Error ? error.message : "Failed to learn from book.",
+        title: "File Read Error",
+        description: "Failed to read the selected file.",
         variant: "destructive",
       })
-    } finally {
-      setIsUploadingBook(false)
     }
   }
 
@@ -163,59 +209,48 @@ export function TextTrainingPanel({ networkId, onAction }: TextTrainingPanelProp
       return
     }
 
-    setIsPredicting(true)
-    try {
-      const response = await fetch("http://localhost:8000/api/brain/actions/predict/", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          network_id: networkId,
-          start_text: predictionPrompt,
-        }),
-      })
-
-      if (response.ok) {
-        const data = await response.json()
-        const continuation = data.story_continuation || data.prediction || data.continuation
-
-        if (Array.isArray(continuation)) {
-          setPredictionResult(continuation.join(" "))
-        } else if (typeof continuation === "string") {
-          setPredictionResult(continuation)
-        } else {
-          setPredictionResult("No prediction generated")
-        }
-
-        toast({
-          title: "Prediction Complete",
-          description: "Story continuation generated successfully.",
-        })
-      } else {
-        const errorData = await response.json()
-        throw new Error(errorData.error || "Failed to generate prediction")
-      }
-    } catch (error) {
-      console.error("Error predicting text:", error)
+    if (!isConnected) {
       toast({
-        title: "Prediction Failed",
-        description: error instanceof Error ? error.message : "Failed to generate prediction.",
+        title: "Connection Error",
+        description: "WebSocket not connected. Please check your connection.",
         variant: "destructive",
       })
-    } finally {
-      setIsPredicting(false)
+      return
     }
+
+    setIsPredicting(true)
+    sendMessage({
+      type: "predict_story",
+      start_text: predictionPrompt,
+      max_length: 15,
+    })
   }
 
   return (
     <div className="space-y-6">
       <Tabs defaultValue="text" className="w-full">
-        <TabsList className="grid w-full grid-cols-3">
-          <TabsTrigger value="text">Learn Text</TabsTrigger>
-          <TabsTrigger value="book">Upload Book</TabsTrigger>
-          <TabsTrigger value="predict">Predict</TabsTrigger>
-        </TabsList>
+        <div className="flex items-center justify-between mb-4">
+          <TabsList className="grid w-full grid-cols-3">
+            <TabsTrigger value="text">Learn Text</TabsTrigger>
+            <TabsTrigger value="book">Upload Book</TabsTrigger>
+            <TabsTrigger value="predict">Predict</TabsTrigger>
+          </TabsList>
+
+          {/* Connection Status */}
+          <div className="flex items-center gap-2">
+            {isConnected ? (
+              <Badge variant="secondary" className="bg-green-100 text-green-800">
+                <Wifi className="w-3 h-3 mr-1" />
+                Connected
+              </Badge>
+            ) : (
+              <Badge variant="secondary" className="bg-red-100 text-red-800">
+                <WifiOff className="w-3 h-3 mr-1" />
+                Disconnected
+              </Badge>
+            )}
+          </div>
+        </div>
 
         <TabsContent value="text" className="mt-6">
           <Card>
@@ -235,10 +270,15 @@ export function TextTrainingPanel({ networkId, onAction }: TextTrainingPanelProp
                   onChange={(e) => setLearningText(e.target.value)}
                   rows={8}
                   className="resize-none"
+                  disabled={isLearning}
                 />
                 <p className="text-xs text-muted-foreground">Characters: {learningText.length}</p>
               </div>
-              <Button onClick={handleLearnText} disabled={isLearning || !learningText.trim()} className="w-full">
+              <Button
+                onClick={handleLearnText}
+                disabled={isLearning || !learningText.trim() || !isConnected}
+                className="w-full"
+              >
                 {isLearning ? (
                   <>
                     <Loader2 className="w-4 h-4 mr-2 animate-spin" />
@@ -272,6 +312,7 @@ export function TextTrainingPanel({ networkId, onAction }: TextTrainingPanelProp
                   accept=".txt,text/plain"
                   onChange={handleFileUpload}
                   className="cursor-pointer"
+                  disabled={isUploadingBook}
                 />
                 <p className="text-xs text-muted-foreground">
                   Upload a text file (max 10MB) for the network to learn from using self-supervised learning.
@@ -288,7 +329,11 @@ export function TextTrainingPanel({ networkId, onAction }: TextTrainingPanelProp
                 </div>
               )}
 
-              <Button onClick={handleUploadBook} disabled={isUploadingBook || !selectedFile} className="w-full">
+              <Button
+                onClick={handleUploadBook}
+                disabled={isUploadingBook || !selectedFile || !isConnected}
+                className="w-full"
+              >
                 {isUploadingBook ? (
                   <>
                     <Loader2 className="w-4 h-4 mr-2 animate-spin" />
@@ -321,11 +366,12 @@ export function TextTrainingPanel({ networkId, onAction }: TextTrainingPanelProp
                   placeholder="Enter a story beginning..."
                   value={predictionPrompt}
                   onChange={(e) => setPredictionPrompt(e.target.value)}
+                  disabled={isPredicting}
                 />
               </div>
               <Button
                 onClick={handlePredictText}
-                disabled={isPredicting || !predictionPrompt.trim()}
+                disabled={isPredicting || !predictionPrompt.trim() || !isConnected}
                 className="w-full"
               >
                 {isPredicting ? (

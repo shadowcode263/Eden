@@ -3,140 +3,111 @@ import random
 from typing import List, Tuple, Dict, Any
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from enum import Enum
+
+
+class EntityType(Enum):
+    """Defines the numerical representation for entities in the grid."""
+    EMPTY = 0.0
+    PLAYER = 0.5
+    GOAL = 1.0
+    OBSTACLE = -1.0
+    SNAKE_BODY = 0.5
+    SNAKE_HEAD = 1.0
+    FOOD = -1.0
 
 
 @dataclass
 class EnvironmentState:
-    """Represents the current state of an environment"""
+    """Represents the current state of an environment."""
     observation: np.ndarray
     reward: float
     done: bool
     info: Dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass
-class EnvironmentConfig:
-    """Configuration for a game environment."""
-    name: str
-    size: int = 10
-    difficulty: str = "medium"
-    # Add other common configuration parameters if needed by services.py
-    # For example, specific parameters for GridWorld, Maze, Snake
-    # These might be passed as kwargs to the environment constructor
-    # Example:
-    # gridworld_obstacles: int = 0
-    # maze_complexity: str = "medium"
-    # snake_initial_length: int = 1
-
-
 class BaseEnvironment(ABC):
-    """Base class for all game environments"""
+    """Abstract base class for all game environments."""
 
-    def __init__(self):
-        self.action_space = []
-        self.observation_space = None
-        self.current_state = None
+    def __init__(self, name: str, size: int):
+        self.name = name
+        self.size = size
+        self.action_space: List[str] = []
         self.done = False
 
     @abstractmethod
     def reset(self) -> EnvironmentState:
-        """Reset environment to initial state"""
+        """Resets the environment to its initial state."""
         pass
 
     @abstractmethod
     def step(self, action: str) -> EnvironmentState:
-        """Take action and return (observation, reward, done, info)"""
+        """Takes an action and returns the new state, reward, and done status."""
         pass
 
     @abstractmethod
     def render(self) -> str:
-        """Return string representation of current state"""
+        """Returns a string representation of the current state for display."""
         pass
 
-    def get_state_size(self) -> int:
-        """Return the size of the state space"""
-        raise NotImplementedError
+    @property
+    def observation_shape(self) -> Tuple[int, ...]:
+        """Returns the shape of the observation space."""
+        return (self.size, self.size)
 
-    def get_action_size(self) -> int:
-        """Return the size of the action space"""
+    @property
+    def action_size(self) -> int:
+        """Returns the number of possible actions."""
         return len(self.action_space)
 
 
 class GridWorldEnvironment(BaseEnvironment):
-    """Simple grid world with obstacles and goal"""
+    """A simple grid world where an agent must navigate to a goal while avoiding obstacles."""
 
-    def __init__(self, size: int = 8):
-        super().__init__()
-        self.size = size
+    def __init__(self, name: str, size: int = 8):
+        super().__init__(name, size)
         self.action_space = ['up', 'down', 'left', 'right']
-        self.grid = np.zeros((size, size))
-        self.player_pos = [0, 0]
-        self.goal_pos = [size - 1, size - 1]
-        self.obstacles = []
-        self.done = False
+        self.player_pos: List[int] = []
+        self.goal_pos: List[int] = []
+        self.obstacles: List[List[int]] = []
         self.steps_taken = 0
-        self.max_steps = size * size * 2  # Reasonable step limit
-        self._generate_obstacles()
+        self.max_steps = self.size * self.size
 
-    def _generate_obstacles(self):
-        """Generate random obstacles"""
+    def _generate_layout(self):
+        """Generates the player, goal, and obstacle positions."""
+        self.player_pos = [0, 0]
+        self.goal_pos = [self.size - 1, self.size - 1]
+        self.obstacles = []
         num_obstacles = self.size // 2
         for _ in range(num_obstacles):
-            attempts = 0
-            while attempts < 50:  # Prevent infinite loop
-                pos = [random.randint(1, self.size - 2), random.randint(1, self.size - 2)]
-                if pos != self.goal_pos and pos != self.player_pos and pos not in self.obstacles:
+            while True:
+                pos = [random.randint(0, self.size - 1), random.randint(0, self.size - 1)]
+                if pos != self.player_pos and pos != self.goal_pos and pos not in self.obstacles:
                     self.obstacles.append(pos)
                     break
-                attempts += 1
 
     def reset(self) -> EnvironmentState:
-        """Reset to starting position"""
-        self.player_pos = [0, 0]
+        self._generate_layout()
         self.done = False
         self.steps_taken = 0
-        observation = self._get_observation()
-        return EnvironmentState(
-            observation=observation,
-            reward=0.0,
-            done=False,
-            info={"steps": self.steps_taken}
-        )
+        return EnvironmentState(observation=self._get_observation(), reward=0.0, done=self.done)
 
     def _get_observation(self) -> np.ndarray:
-        """Get current state as observation"""
-        obs = np.zeros((self.size, self.size))
-
-        # Mark obstacles
-        for obs_pos in self.obstacles:
-            obs[obs_pos[0], obs_pos[1]] = -1
-
-        # Mark goal
-        obs[self.goal_pos[0], self.goal_pos[1]] = 1
-
-        # Mark player
-        obs[self.player_pos[0], self.player_pos[1]] = 0.5
-
-        return obs.flatten()  # Flatten for consistent observation space
-
-    def get_state_size(self) -> int:
-        return self.size * self.size
+        obs = np.full((self.size, self.size), EntityType.EMPTY.value)
+        for ob_pos in self.obstacles:
+            obs[ob_pos[0], ob_pos[1]] = EntityType.OBSTACLE.value
+        obs[self.goal_pos[0], self.goal_pos[1]] = EntityType.GOAL.value
+        obs[self.player_pos[0], self.player_pos[1]] = EntityType.PLAYER.value
+        return obs
 
     def step(self, action: str) -> EnvironmentState:
-        """Take action and return result"""
         if self.done:
-            # Environment is already done, return current state
-            return EnvironmentState(
-                observation=self._get_observation(),
-                reward=0.0,
-                done=True,
-                info={"steps": self.steps_taken, "reason": "already_done"}
-            )
+            return EnvironmentState(self._get_observation(), 0.0, True, {"reason": "already_done"})
 
-        old_pos = self.player_pos.copy()
         self.steps_taken += 1
+        old_pos = self.player_pos.copy()
+        old_dist = abs(old_pos[0] - self.goal_pos[0]) + abs(old_pos[1] - self.goal_pos[1])
 
-        # Move based on action
         if action == 'up' and self.player_pos[0] > 0:
             self.player_pos[0] -= 1
         elif action == 'down' and self.player_pos[0] < self.size - 1:
@@ -146,293 +117,120 @@ class GridWorldEnvironment(BaseEnvironment):
         elif action == 'right' and self.player_pos[1] < self.size - 1:
             self.player_pos[1] += 1
 
-        reward = 0.0
+        new_dist = abs(self.player_pos[0] - self.goal_pos[0]) + abs(self.player_pos[1] - self.goal_pos[1])
+
         info = {"steps": self.steps_taken}
-
-        # Check for collision with obstacles
         if self.player_pos in self.obstacles:
-            self.player_pos = old_pos  # Revert move
-            reward = -0.1
+            self.player_pos = old_pos
+            reward = -10.0
             info["collision"] = True
-
-        # Check for goal
         elif self.player_pos == self.goal_pos:
-            reward = 10.0
+            reward = 50.0
             self.done = True
             info["success"] = True
-
-        # Check for step limit
         elif self.steps_taken >= self.max_steps:
-            reward = -1.0
+            reward = -5.0
             self.done = True
             info["timeout"] = True
-
         else:
-            # Small negative reward for each step to encourage efficiency
-            reward = -0.01
+            # Reward for getting closer, penalize for moving away or standing still
+            distance_reward = (old_dist - new_dist)
+            step_penalty = -0.1
+            reward = distance_reward + step_penalty
 
-        return EnvironmentState(
-            observation=self._get_observation(),
-            reward=reward,
-            done=self.done,
-            info=info
-        )
+        return EnvironmentState(self._get_observation(), reward, self.done, info)
 
     def render(self) -> str:
-        """Render current state"""
-        display = []
-        for i in range(self.size):
-            row = []
-            for j in range(self.size):
-                if [i, j] == self.player_pos:
-                    row.append('P')
-                elif [i, j] == self.goal_pos:
-                    row.append('G')
-                elif [i, j] in self.obstacles:
-                    row.append('X')
-                else:
-                    row.append('.')
-            display.append(' '.join(row))
-        return '\n'.join(display)
+        grid = [['.' for _ in range(self.size)] for _ in range(self.size)]
+        for x, y in self.obstacles: grid[x][y] = 'X'
+        grid[self.goal_pos[0], self.goal_pos[1]] = 'G'
+        grid[self.player_pos[0], self.player_pos[1]] = 'P'
+        return "\n".join(" ".join(row) for row in grid)
 
 
-class MazeEnvironment(BaseEnvironment):
-    """Maze environment with procedural generation"""
+class MazeEnvironment(GridWorldEnvironment):
+    """A maze environment that inherits from GridWorld and overrides layout generation."""
 
-    def __init__(self, size: int = 10):
-        super().__init__()
-        self.size = size if size % 2 == 1 else size + 1  # Ensure odd size for maze generation
-        self.action_space = ['up', 'down', 'left', 'right']
-        self.maze = None
+    def __init__(self, name: str, size: int = 11):
+        # Maze size must be odd
+        super().__init__(name, size if size % 2 == 1 else size + 1)
+
+    def _generate_layout(self):
+        """Generates a solvable maze using recursive backtracking."""
         self.player_pos = [1, 1]
         self.goal_pos = [self.size - 2, self.size - 2]
-        self.done = False
-        self.steps_taken = 0
-        self.max_steps = self.size * self.size
-        self._generate_maze()
 
-    def _generate_maze(self):
-        """Generate a solvable maze using recursive backtracking"""
-        # Initialize maze with walls
-        self.maze = np.ones((self.size, self.size))
+        # In this context, obstacles are walls
+        maze = np.full((self.size, self.size), EntityType.OBSTACLE.value)
 
-        # Create paths
-        def carve_path(x, y):
-            self.maze[x, y] = 0  # Mark as path
-
-            # Randomize directions
+        def carve(x, y):
+            maze[x, y] = EntityType.EMPTY.value
             directions = [(0, 2), (2, 0), (0, -2), (-2, 0)]
             random.shuffle(directions)
-
             for dx, dy in directions:
                 nx, ny = x + dx, y + dy
-                if (1 <= nx < self.size - 1 and 1 <= ny < self.size - 1 and
-                        self.maze[nx, ny] == 1):
-                    # Carve wall between current and next cell
-                    self.maze[x + dx // 2, y + dy // 2] = 0
-                    carve_path(nx, ny)
+                if 0 <= nx < self.size and 0 <= ny < self.size and maze[nx, ny] == EntityType.OBSTACLE.value:
+                    maze[x + dx // 2, y + dy // 2] = EntityType.EMPTY.value
+                    carve(nx, ny)
 
-        # Start carving from (1,1)
-        carve_path(1, 1)
+        carve(self.player_pos[0], self.player_pos[1])
+        # Ensure the goal is reachable
+        maze[self.goal_pos[0], self.goal_pos[1]] = EntityType.EMPTY.value
 
-        # Ensure goal is reachable
-        self.maze[self.goal_pos[0], self.goal_pos[1]] = 0
-
-        # Add some extra paths for complexity
-        for _ in range(self.size // 4):
-            x, y = random.randint(1, self.size - 2), random.randint(1, self.size - 2)
-            self.maze[x, y] = 0
-
-    def reset(self) -> EnvironmentState:
-        """Reset to starting position"""
-        self.player_pos = [1, 1]
-        self.done = False
-        self.steps_taken = 0
-        observation = self._get_observation()
-        return EnvironmentState(
-            observation=observation,
-            reward=0.0,
-            done=False,
-            info={"steps": self.steps_taken}
-        )
-
-    def _get_observation(self) -> np.ndarray:
-        """Get current state as observation"""
-        obs = self.maze.copy()
-
-        # Mark player position
-        obs[self.player_pos[0], self.player_pos[1]] = 0.5
-
-        # Mark goal position
-        obs[self.goal_pos[0], self.goal_pos[1]] = -0.5
-
-        return obs.flatten()  # Flatten for consistent observation space
-
-    def get_state_size(self) -> int:
-        return self.size * self.size
-
-    def step(self, action: str) -> EnvironmentState:
-        """Take action and return result"""
-        if self.done:
-            return EnvironmentState(
-                observation=self._get_observation(),
-                reward=0.0,
-                done=True,
-                info={"steps": self.steps_taken, "reason": "already_done"}
-            )
-
-        old_pos = self.player_pos.copy()
-        self.steps_taken += 1
-
-        # Move based on action
-        if action == 'up':
-            self.player_pos[0] -= 1
-        elif action == 'down':
-            self.player_pos[0] += 1
-        elif action == 'left':
-            self.player_pos[1] -= 1
-        elif action == 'right':
-            self.player_pos[1] += 1
-
-        reward = 0.0
-        info = {"steps": self.steps_taken}
-
-        # Check bounds and walls
-        if (self.player_pos[0] < 0 or self.player_pos[0] >= self.size or
-                self.player_pos[1] < 0 or self.player_pos[1] >= self.size or
-                self.maze[self.player_pos[0], self.player_pos[1]] == 1):
-            self.player_pos = old_pos  # Revert move
-            reward = -0.1
-            info["collision"] = True
-
-        # Check for goal
-        elif self.player_pos == self.goal_pos:
-            reward = 10.0
-            self.done = True
-            info["success"] = True
-
-        # Check for step limit
-        elif self.steps_taken >= self.max_steps:
-            reward = -1.0
-            self.done = True
-            info["timeout"] = True
-
-        else:
-            # Small negative reward for each step
-            reward = -0.01
-
-        return EnvironmentState(
-            observation=self._get_observation(),
-            reward=reward,
-            done=self.done,
-            info=info
-        )
-
-    def render(self) -> str:
-        """Render current state"""
-        display = []
-        for i in range(self.size):
-            row = []
-            for j in range(self.size):
-                if [i, j] == self.player_pos:
-                    row.append('P')
-                elif [i, j] == self.goal_pos:
-                    row.append('G')
-                elif self.maze[i, j] == 1:
-                    row.append('█')
-                else:
-                    row.append(' ')
-            display.append(''.join(row))
-        return '\n'.join(display)
+        self.obstacles = list(zip(*np.where(maze == EntityType.OBSTACLE.value)))
 
 
 class SnakeEnvironment(BaseEnvironment):
-    """Classic Snake game"""
+    """Classic Snake game environment."""
 
-    def __init__(self, size: int = 10):
-        super().__init__()
-        self.size = size
+    def __init__(self, name: str, size: int = 10):
+        super().__init__(name, size)
         self.action_space = ['up', 'down', 'left', 'right']
-        self.snake = [[size // 2, size // 2]]
+        self.snake: List[List[int]] = []
         self.direction = 'right'
-        self.food_pos = None
+        self.food_pos: List[int] = []
         self.score = 0
-        self.done = False
-        self.steps_taken = 0
-        self.max_steps = size * size * 4  # Generous step limit
-        self._place_food()
+        self.steps_since_food = 0
+        self.max_steps_without_food = self.size * self.size
 
     def _place_food(self):
-        """Place food at random location not occupied by snake"""
-        attempts = 0
-        while attempts < 100:  # Prevent infinite loop
+        while True:
             pos = [random.randint(0, self.size - 1), random.randint(0, self.size - 1)]
             if pos not in self.snake:
                 self.food_pos = pos
-                break
-            attempts += 1
+                return
 
     def reset(self) -> EnvironmentState:
-        """Reset game state"""
         self.snake = [[self.size // 2, self.size // 2]]
         self.direction = 'right'
         self.score = 0
         self.done = False
-        self.steps_taken = 0
+        self.steps_since_food = 0
         self._place_food()
-        observation = self._get_observation()
-        return EnvironmentState(
-            observation=observation,
-            reward=0.0,
-            done=False,
-            info={"steps": self.steps_taken, "score": self.score}
-        )
+        return EnvironmentState(self._get_observation(), 0.0, self.done)
 
     def _get_observation(self) -> np.ndarray:
-        """Get current state as observation"""
-        obs = np.zeros((self.size, self.size))
-
-        # Mark snake body
+        obs = np.full((self.size, self.size), EntityType.EMPTY.value)
+        obs[self.food_pos[0], self.food_pos[1]] = EntityType.FOOD.value
         for segment in self.snake:
-            obs[segment[0], segment[1]] = 0.5
-
-        # Mark snake head
-        if self.snake:
-            head = self.snake[0]
-            obs[head[0], head[1]] = 1.0
-
-        # Mark food
-        if self.food_pos:
-            obs[self.food_pos[0], self.food_pos[1]] = -1.0
-
-        return obs.flatten()  # Flatten for consistent observation space
-
-    def get_state_size(self) -> int:
-        return self.size * self.size
+            obs[segment[0], segment[1]] = EntityType.SNAKE_BODY.value
+        # Head is distinct
+        obs[self.snake[0][0], self.snake[0][1]] = EntityType.SNAKE_HEAD.value
+        return obs
 
     def step(self, action: str) -> EnvironmentState:
-        """Take action and return result"""
         if self.done:
-            return EnvironmentState(
-                observation=self._get_observation(),
-                reward=0.0,
-                done=True,
-                info={"steps": self.steps_taken, "score": self.score, "reason": "already_done"}
-            )
+            return EnvironmentState(self._get_observation(), 0.0, True, {"reason": "already_done"})
 
-        self.steps_taken += 1
+        self.steps_since_food += 1
 
-        # Update direction (can't reverse)
-        if action == 'up' and self.direction != 'down':
-            self.direction = 'up'
-        elif action == 'down' and self.direction != 'up':
-            self.direction = 'down'
-        elif action == 'left' and self.direction != 'right':
-            self.direction = 'left'
-        elif action == 'right' and self.direction != 'left':
-            self.direction = 'right'
+        # Prevent snake from reversing on itself
+        if (action == 'up' and self.direction != 'down') or \
+                (action == 'down' and self.direction != 'up') or \
+                (action == 'left' and self.direction != 'right') or \
+                (action == 'right' and self.direction != 'left'):
+            self.direction = action
 
-        # Move snake head
         head = self.snake[0].copy()
         if self.direction == 'up':
             head[0] -= 1
@@ -443,113 +241,62 @@ class SnakeEnvironment(BaseEnvironment):
         elif self.direction == 'right':
             head[1] += 1
 
-        reward = 0.0
-        info = {"steps": self.steps_taken, "score": self.score}
-
-        # Check wall collision
-        if (head[0] < 0 or head[0] >= self.size or
-                head[1] < 0 or head[1] >= self.size):
-            reward = -10.0
+        info = {"score": self.score}
+        if not (0 <= head[0] < self.size and 0 <= head[1] < self.size) or head in self.snake:
+            reward = -100.0  # Harsh penalty for dying
             self.done = True
-            info["wall_collision"] = True
-
-        # Check self collision
-        elif head in self.snake:
-            reward = -10.0
-            self.done = True
-            info["self_collision"] = True
-
+            info["death"] = "wall_collision" if not (
+                        0 <= head[0] < self.size and 0 <= head[1] < self.size) else "self_collision"
         else:
-            # Add new head
             self.snake.insert(0, head)
-
-            # Check food collision
             if head == self.food_pos:
                 self.score += 1
+                self.steps_since_food = 0
                 self._place_food()
-                reward = 10.0
+                reward = 100.0  # Large reward for eating
                 info["food_eaten"] = True
             else:
-                # Remove tail if no food eaten
                 self.snake.pop()
-                reward = 0.1  # Small positive reward for staying alive
+                # Reward for getting closer to food
+                old_dist = abs(self.snake[1][0] - self.food_pos[0]) + abs(self.snake[1][1] - self.food_pos[1])
+                new_dist = abs(head[0] - self.food_pos[0]) + abs(head[1] - self.food_pos[1])
+                reward = (old_dist - new_dist) * 0.5 - 0.1  # Small step penalty
 
-            # Check step limit
-            if self.steps_taken >= self.max_steps:
-                reward = -1.0
-                self.done = True
-                info["timeout"] = True
+        if self.steps_since_food > self.max_steps_without_food:
+            self.done = True
+            info["death"] = "starvation"
 
-        return EnvironmentState(
-            observation=self._get_observation(),
-            reward=reward,
-            done=self.done,
-            info=info
-        )
+        return EnvironmentState(self._get_observation(), reward, self.done, info)
 
     def render(self) -> str:
-        """Render current state"""
-        display = []
-        for i in range(self.size):
-            row = []
-            for j in range(self.size):
-                if [i, j] == self.snake[0]:  # Head
-                    row.append('H')
-                elif [i, j] in self.snake:  # Body
-                    row.append('S')
-                elif [i, j] == self.food_pos:  # Food
-                    row.append('F')
-                else:
-                    row.append('.')
-            display.append(' '.join(row))
-        return '\n'.join(display) + f'\nScore: {self.score}'
+        grid = [['.' for _ in range(self.size)] for _ in range(self.size)]
+        grid[self.food_pos[0]][self.food_pos[1]] = 'F'
+        for x, y in self.snake: grid[x][y] = 'S'
+        grid[self.snake[0][0]][self.snake[0][1]] = 'H'
+        return "\n".join(" ".join(row) for row in grid) + f"\nScore: {self.score}"
 
 
 class EnvironmentManager:
-    """Manager for creating and listing environments"""
+    """A centralized manager for creating and listing game environments."""
 
-    def __init__(self):
-        self.environments = {
-            'gridworld': GridWorldEnvironment,
-            'maze': MazeEnvironment,
-            'snake': SnakeEnvironment
-        }
+    _environments = {
+        'gridworld': GridWorldEnvironment,
+        'maze': MazeEnvironment,
+        'snake': SnakeEnvironment
+    }
 
-    def create_environment(self, env_name: str, **kwargs) -> BaseEnvironment:
-        """Create environment instance"""
-        if env_name not in self.environments:
-            raise ValueError(f"Unknown environment: {env_name}")
+    @classmethod
+    def get_env(cls, env_name: str, **kwargs) -> BaseEnvironment:
+        """Creates an instance of a specified environment."""
+        if env_name not in cls._environments:
+            raise ValueError(f"Unknown environment: '{env_name}'. Available: {list(cls._environments.keys())}")
+        return cls._environments[env_name](name=env_name, **kwargs)
 
-        return self.environments[env_name](**kwargs)
-
-    def get_available_environments(self) -> List[str]:
-        """Get list of available environment names"""
-        return list(self.environments.keys())
-
-    def get_environment_descriptions(self) -> Dict[str, str]:
-        """Get descriptions of all environments"""
+    @classmethod
+    def get_environment_descriptions(cls) -> Dict[str, str]:
+        """Returns a dictionary of available environments and their descriptions."""
         return {
-            'gridworld': 'Simple grid navigation with obstacles - reach the goal while avoiding obstacles',
-            'maze': 'Navigate through a randomly generated maze to reach the exit',
-            'snake': 'Classic snake game - eat food and grow without hitting walls or yourself'
+            'gridworld': 'A simple grid navigation task. The agent must reach the goal (G) while avoiding obstacles (X).',
+            'maze': 'A more complex navigation task where the agent must find its way through a procedurally generated maze.',
+            'snake': 'The classic arcade game. The agent (H) must eat food (F) to grow longer (S) without hitting walls or itself.'
         }
-
-
-# Global instances and functions for backward compatibility
-ENVIRONMENTS = {
-    'gridworld': GridWorldEnvironment,
-    'maze': MazeEnvironment,
-    'snake': SnakeEnvironment
-}
-
-
-def create_environment(env_name: str, **kwargs) -> BaseEnvironment:
-    """Create environment instance"""
-    manager = EnvironmentManager()
-    return manager.create_environment(env_name, **kwargs)
-
-
-def get_environment_descriptions() -> Dict[str, str]:
-    """Get environment descriptions"""
-    manager = EnvironmentManager()
-    return manager.get_environment_descriptions()
